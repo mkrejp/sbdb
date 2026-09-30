@@ -19,8 +19,10 @@ from sample_db_backend.sync.npu_geoportal import (
     extract_object_ids,
     features_from_detail,
     load_json_file,
+    missing_npu_objectids,
     page_size,
     parse_layer_metadata,
+    snapshot_from_feature,
     upsert_detail_file,
     upsert_feature,
 )
@@ -279,6 +281,42 @@ def test_upsert_detail_file_commits_once(monkeypatch: MonkeyPatch) -> None:
     assert stats.features == 2
     assert stats.upserted == 2
     assert commits["n"] == 1
+
+
+def test_missing_npu_objectids_preserves_order() -> None:
+    """missing_npu_objectids drops existing IDs and keeps candidate order."""
+
+    class _Rows:
+        def fetchall(self) -> list[dict[str, Any]]:
+            return [{"npu_objectid": 101}, {"npu_objectid": 103}]
+
+    class _Conn:
+        def execute(self, sql: str, params: tuple[Any, ...] | None = None) -> _Rows:
+            del sql, params
+            return _Rows()
+
+    missing = missing_npu_objectids(
+        _Conn(),  # type: ignore[arg-type]
+        layer_id=uuid4(),
+        candidates=[101, 102, 103, 104],
+    )
+    assert missing == [102, 104]
+
+
+def test_snapshot_from_feature_includes_tags_and_urls() -> None:
+    """Feature snapshot captures classified tags/urls for diff comparison."""
+    feature = features_from_detail(load_json_file(FIXTURES / "detail.geojson"))[0]
+    snap = snapshot_from_feature(
+        feature,
+        tag_fields={"Subtyp"},
+        url_fields={"urlExt"},
+        temporal_fields=set(),
+    )
+    assert snap is not None
+    assert snap.npu_objectid == 101
+    assert "NKP" in snap.tags
+    assert ("urlExt", "https://npu.cz/a") in snap.urls
+    assert '"type":"Point"' in snap.geometry_json
 
 
 def test_cli_extract_ids(capsys: CaptureFixture[str]) -> None:

@@ -83,8 +83,17 @@ Before pulling, wget the **MapServer layer root** metadata (`…/MapServer/<id>?
 
 1. wget metadata → Python `page-size` / `layer-name` / `ensure-layer`.
 2. Loop ID-list pages (`returnIdsOnly` + `resultOffset` / `resultRecordCount`).
-3. For each small batch of IDs: wget detail GeoJSON → Python `upsert-file` (one txn).
-4. Retries: **1 try + 3 retries (= 4 attempts)** per URL in **bash** (`NPU_MAX_RETRIES`).
+3. **Skip OBJECTIDs already in** `layer_objects` (Python `missing-ids`) so sync fills gradually.
+4. For each small batch of **missing** IDs: wget detail GeoJSON → Python `upsert-file` (one txn).
+5. Retries: **1 try + 3 retries (= 4 attempts)** per URL in **bash** (`NPU_MAX_RETRIES`).
+6. If **all** listed OBJECTIDs are already present, the script suggests a property diff pass:
+
+```bash
+timeout 300 ./scripts/sample-db-npu-sync --diff
+# or: NPU_SYNC_MODE=diff timeout 300 ./scripts/sample-db-npu-sync
+```
+
+Diff mode re-fetches details for every ID and runs `upsert-file --only-if-changed` (updates only when geometry/properties/tags/urls differ).
 
 ## Step 3 — Long-term sync into Postgres
 

@@ -3,8 +3,13 @@
 #
 # Marek flow:
 #   1. wget -O pamatky.json   → object **list** (returnIdsOnly pages)
-#   2. for each OBJECTID (small batches): wget detail GeoJSON
-#   3. Python transform + upsert into Postgres (DATABASE_URL)
+#   2. skip OBJECTIDs already in Postgres (gradual insert)
+#   3. for each missing OBJECTID (small batches): wget detail GeoJSON
+#   4. Python transform + upsert into Postgres (DATABASE_URL)
+#
+# When every listed OBJECTID is already present, the script suggests a
+# property difference check (`--diff` / NPU_SYNC_MODE=diff) that re-fetches
+# details and updates only objects whose properties/geometry differ.
 #
 # Usage (WSL preferred)::
 #
@@ -12,6 +17,8 @@
 #   export DATABASE_URL=…   # Supabase pooler
 #   timeout 300 ./scripts/sample-db-npu-sync
 #   # or: timeout 300 uv run sample-db-npu-sync
+#   # re-check / update changed objects:
+#   timeout 300 ./scripts/sample-db-npu-sync --diff
 #
 # Env:
 #   DATABASE_URL          required
@@ -21,6 +28,7 @@
 #   NPU_DETAIL_BATCH      OBJECTIDs per detail wget (default 10)
 #   NPU_WGET_TIMEOUT      seconds per wget (default 60)
 #   NPU_MAX_RETRIES       retries after first try (default 3 → 4 attempts)
+#   NPU_SYNC_MODE         insert (default) | diff
 #
 set -euo pipefail
 
@@ -33,7 +41,31 @@ NPU_LAYER_URL="${NPU_LAYER_URL:-${DEFAULT_LAYER_URL}}"
 NPU_DETAIL_BATCH="${NPU_DETAIL_BATCH:-10}"
 NPU_WGET_TIMEOUT="${NPU_WGET_TIMEOUT:-60}"
 NPU_MAX_RETRIES="${NPU_MAX_RETRIES:-3}"
+NPU_SYNC_MODE="${NPU_SYNC_MODE:-insert}"
 BACKOFF_BASE=1
+
+for arg in "$@"; do
+  case "${arg}" in
+    --diff) NPU_SYNC_MODE=diff ;;
+    --insert) NPU_SYNC_MODE=insert ;;
+    -h|--help)
+      sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      printf 'ERROR unknown argument: %s\n' "${arg}" >&2
+      exit 1
+      ;;
+  esac
+done
+
+case "${NPU_SYNC_MODE}" in
+  insert|diff) ;;
+  *)
+    printf 'ERROR NPU_SYNC_MODE must be insert or diff (got %s)\n' "${NPU_SYNC_MODE}" >&2
+    exit 1
+    ;;
+esac
 
 # Prefer uv-run Python when available (repo venv); else bare python3 + PYTHONPATH.
 if command -v uv >/dev/null 2>&1; then
@@ -112,7 +144,7 @@ wget_retry "${META_JSON}" "${LAYER_ROOT}?f=json"
 
 PAGE_SIZE="$("${PY[@]}" page-size "${META_JSON}")"
 LAYER_NAME="$("${PY[@]}" layer-name "${META_JSON}" --override "${NPU_LAYER_NAME:-}")"
-log "npu_sync_start layer=${LAYER_ROOT} page_size=${PAGE_SIZE} detail_batch=${NPU_DETAIL_BATCH} name=${LAYER_NAME}"
+log "npu_sync_start mode=${NPU_SYNC_MODE} layer=${LAYER_ROOT} page_size=${PAGE_SIZE} detail_batch=${NPU_DETAIL_BATCH} name=${LAYER_NAME}"
 
 LAYER_ID="$("${PY[@]}" ensure-layer --layer-url "${LAYER_ROOT}" --name "${LAYER_NAME}" --database-url "${DATABASE_URL}")"
 log "npu_layer_id=${LAYER_ID}"
@@ -124,10 +156,17 @@ URL_ARGS=()
 TEMP_ARGS=()
 [[ -n "${NPU_TEMPORAL_FIELDS:-}" ]] && TEMP_ARGS+=(--temporal-fields "${NPU_TEMPORAL_FIELDS}")
 
+DIFF_ARGS=()
+if [[ "${NPU_SYNC_MODE}" == "diff" ]]; then
+  DIFF_ARGS+=(--only-if-changed)
+fi
+
 # --- 1) Paginated object **list** → pamatky.json ---
 offset=0
 list_pages=0
 total_ids=0
+total_missing=0
+total_skipped=0
 total_upserted=0
 total_features=0
 
@@ -147,12 +186,36 @@ while true; do
   total_ids=$((total_ids + count))
   log "npu_list_page pages=${list_pages} ids=${count} offset=${offset}"
 
-  # --- 2) For each small batch of IDs: wget **detail** → 3) Python insert ---
+  # --- filter: skip OBJECTIDs already in DB (insert mode) ---
+  WORK_IDS=("${IDS[@]}")
+  if [[ "${NPU_SYNC_MODE}" == "insert" ]]; then
+    mapfile -t WORK_IDS < <(
+      printf '%s\n' "${IDS[@]}" | "${PY[@]}" missing-ids \
+        --layer-id "${LAYER_ID}" \
+        --database-url "${DATABASE_URL}"
+    )
+    skipped=$((count - ${#WORK_IDS[@]}))
+    total_skipped=$((total_skipped + skipped))
+    total_missing=$((total_missing + ${#WORK_IDS[@]}))
+    log "npu_skip_existing page_ids=${count} missing=${#WORK_IDS[@]} skipped=${skipped}"
+    if (( ${#WORK_IDS[@]} == 0 )); then
+      if (( count < PAGE_SIZE )); then
+        break
+      fi
+      offset=$((offset + count))
+      continue
+    fi
+  else
+    total_missing=$((total_missing + count))
+  fi
+
+  # --- 2) For each small batch of IDs: wget **detail** → 3) Python insert/diff ---
+  work_count=${#WORK_IDS[@]}
   i=0
-  while (( i < count )); do
+  while (( i < work_count )); do
     batch=()
-    for (( j = 0; j < NPU_DETAIL_BATCH && i < count; j++, i++ )); do
-      batch+=("${IDS[i]}")
+    for (( j = 0; j < NPU_DETAIL_BATCH && i < work_count; j++, i++ )); do
+      batch+=("${WORK_IDS[i]}")
     done
     # Join OBJECTIDs with commas (ArcGIS objectIds=)
     IFS=,
@@ -168,7 +231,7 @@ while true; do
     result="$("${PY[@]}" upsert-file "${DETAIL_JSON}" \
       --layer-id "${LAYER_ID}" \
       --database-url "${DATABASE_URL}" \
-      "${TAG_ARGS[@]}" "${URL_ARGS[@]}" "${TEMP_ARGS[@]}")"
+      "${TAG_ARGS[@]}" "${URL_ARGS[@]}" "${TEMP_ARGS[@]}" "${DIFF_ARGS[@]}")"
     # result like "3/3"
     up="${result%%/*}"
     feat="${result##*/}"
@@ -183,4 +246,11 @@ while true; do
   offset=$((offset + count))
 done
 
-log "npu_sync_done list_pages=${list_pages} ids=${total_ids} features=${total_features} upserted=${total_upserted} layer_id=${LAYER_ID}"
+log "npu_sync_done mode=${NPU_SYNC_MODE} list_pages=${list_pages} ids=${total_ids} missing=${total_missing} skipped=${total_skipped} features=${total_features} upserted=${total_upserted} layer_id=${LAYER_ID}"
+
+if [[ "${NPU_SYNC_MODE}" == "insert" ]] && (( total_ids > 0 && total_missing == 0 )); then
+  warn "All ${total_ids} OBJECTIDs are already in the database — nothing new to insert."
+  warn "To difference-check each object's properties and update those that differ, re-run:"
+  warn "  NPU_SYNC_MODE=diff timeout 300 ./scripts/sample-db-npu-sync"
+  warn "  # or: timeout 300 ./scripts/sample-db-npu-sync --diff"
+fi

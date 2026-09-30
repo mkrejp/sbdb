@@ -5,13 +5,15 @@ via ``wget -O``. This module never calls wget/httpx/requests for NPÚ.
 
 Bash flow (Marek):
   1. wget object **list** JSON (``returnIdsOnly`` pages → ``pamatky.json``)
-  2. for each id (or small batch): wget **detail** GeoJSON
-  3. Python transform + insert/upsert into destination Postgres
+  2. filter out OBJECTIDs already in Postgres (gradual insert); ``--diff`` skips filter
+  3. for each remaining id (small batches): wget **detail** GeoJSON
+  4. Python transform + insert/upsert (diff mode: ``--only-if-changed``)
 
 CLI (invoked by bash)::
 
     uv run python -m sample_db_backend.sync.npu_geoportal page-size META.json
     uv run python -m sample_db_backend.sync.npu_geoportal extract-ids LIST.json
+    uv run python -m sample_db_backend.sync.npu_geoportal missing-ids --layer-id …
     uv run python -m sample_db_backend.sync.npu_geoportal ensure-layer ...
     uv run python -m sample_db_backend.sync.npu_geoportal upsert-file DETAIL.json ...
 
@@ -85,6 +87,18 @@ class UpsertStats:
 
     features: int
     upserted: int
+    unchanged: int = 0
+
+
+@dataclass(frozen=True)
+class FeatureSnapshot:
+    """Comparable mirror of one layer object (geometry + derived children)."""
+
+    npu_objectid: int
+    geometry_json: str
+    tags: frozenset[str]
+    urls: tuple[tuple[str, str], ...]
+    props: frozenset[tuple[str, str, str]]
 
 
 def _normalize_layer_root(url: str) -> str:
@@ -330,6 +344,204 @@ def ensure_layer(
     return row["id"]
 
 
+def existing_npu_objectids(
+    conn: psycopg.Connection[Any],
+    *,
+    layer_id: Any,
+    candidates: list[int],
+) -> set[int]:
+    """Return the subset of ``candidates`` already stored for ``layer_id``."""
+    if not candidates:
+        return set()
+    rows = conn.execute(
+        """
+        SELECT npu_objectid
+        FROM layer_objects
+        WHERE layer_id = %s
+          AND npu_objectid = ANY(%s)
+        """,
+        (layer_id, candidates),
+    ).fetchall()
+    found: set[int] = set()
+    for row in rows:
+        raw = row["npu_objectid"]
+        if raw is not None:
+            found.add(int(raw))
+    return found
+
+
+def missing_npu_objectids(
+    conn: psycopg.Connection[Any],
+    *,
+    layer_id: Any,
+    candidates: list[int],
+) -> list[int]:
+    """Preserve candidate order; drop OBJECTIDs already present in Postgres."""
+    existing = existing_npu_objectids(conn, layer_id=layer_id, candidates=candidates)
+    return [oid for oid in candidates if oid not in existing]
+
+
+def _geometry_json(geometry: dict[str, Any]) -> str:
+    """Canonical JSON for geometry equality checks."""
+    return json.dumps(geometry, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _prop_value_str(kind: str, payload: Any) -> str:
+    """Normalize a classified property payload for snapshot comparison."""
+    if kind == "temporal" and isinstance(payload, datetime):
+        return _as_aware_utc(payload).isoformat()
+    return str(payload)
+
+
+def snapshot_from_feature(
+    feature: dict[str, Any],
+    *,
+    tag_fields: set[str],
+    url_fields: set[str],
+    temporal_fields: set[str] | None = None,
+) -> FeatureSnapshot | None:
+    """Build a comparable snapshot from a GeoJSON Feature (no DB)."""
+    props = dict(feature.get("properties") or {})
+    geometry = feature.get("geometry")
+    if not isinstance(geometry, dict) or "type" not in geometry:
+        return None
+    npu_id = extract_npu_objectid(props)
+    if npu_id is None:
+        return None
+
+    tags: set[str] = set()
+    urls: list[tuple[str, str]] = []
+    prop_rows: set[tuple[str, str, str]] = set()
+    for key, value in props.items():
+        mapped = classify_attribute(
+            key,
+            value,
+            tag_fields=tag_fields,
+            url_fields=url_fields,
+            temporal_fields=temporal_fields,
+        )
+        if mapped is None:
+            continue
+        kind, payload = mapped
+        if kind == "tag":
+            name = str(payload).strip()
+            if name:
+                tags.add(name)
+        elif kind == "url":
+            urls.append((key, str(payload)))
+        else:
+            prop_rows.add((key, kind, _prop_value_str(kind, payload)))
+    return FeatureSnapshot(
+        npu_objectid=npu_id,
+        geometry_json=_geometry_json(geometry),
+        tags=frozenset(tags),
+        urls=tuple(urls),
+        props=frozenset(prop_rows),
+    )
+
+
+def load_db_snapshot(
+    conn: psycopg.Connection[Any],
+    *,
+    layer_id: Any,
+    npu_objectid: int,
+) -> FeatureSnapshot | None:
+    """Load the stored snapshot for one NPÚ OBJECTID, or None if absent."""
+    row = conn.execute(
+        """
+        SELECT id, geometry
+        FROM layer_objects
+        WHERE layer_id = %s AND npu_objectid = %s
+        """,
+        (layer_id, npu_objectid),
+    ).fetchone()
+    if row is None:
+        return None
+    object_id = row["id"]
+    geometry = row["geometry"]
+    if isinstance(geometry, str):
+        geometry = json.loads(geometry)
+    if not isinstance(geometry, dict):
+        geometry = {}
+
+    tag_rows = conn.execute(
+        """
+        SELECT t.name AS name
+        FROM layer_object_tags lot
+        JOIN tags t ON t.id = lot.tag_id
+        WHERE lot.object_id = %s
+        """,
+        (object_id,),
+    ).fetchall()
+    tags = frozenset(str(r["name"]) for r in tag_rows if r.get("name"))
+
+    url_rows = conn.execute(
+        """
+        SELECT label, url
+        FROM layer_object_urls
+        WHERE object_id = %s
+        ORDER BY sort_order, label, url
+        """,
+        (object_id,),
+    ).fetchall()
+    urls = tuple((str(r["label"] or ""), str(r["url"])) for r in url_rows)
+
+    prop_rows_db = conn.execute(
+        """
+        SELECT key, value_type, text_value, temporal_value
+        FROM layer_object_properties
+        WHERE object_id = %s
+        """,
+        (object_id,),
+    ).fetchall()
+    props: set[tuple[str, str, str]] = set()
+    for prow in prop_rows_db:
+        key = str(prow["key"])
+        value_type = str(prow["value_type"])
+        if value_type == "temporal" and prow.get("temporal_value") is not None:
+            tv = prow["temporal_value"]
+            if isinstance(tv, datetime):
+                value_str = _as_aware_utc(tv).isoformat()
+            else:
+                value_str = str(tv)
+        else:
+            value_str = str(prow.get("text_value") or "")
+            value_type = "text"
+        props.add((key, value_type, value_str))
+
+    return FeatureSnapshot(
+        npu_objectid=npu_objectid,
+        geometry_json=_geometry_json(geometry),
+        tags=tags,
+        urls=urls,
+        props=frozenset(props),
+    )
+
+
+def feature_needs_update(
+    conn: psycopg.Connection[Any],
+    *,
+    layer_id: Any,
+    feature: dict[str, Any],
+    tag_fields: set[str],
+    url_fields: set[str],
+    temporal_fields: set[str] | None = None,
+) -> bool:
+    """True when the feature is absent or differs from the stored snapshot."""
+    incoming = snapshot_from_feature(
+        feature,
+        tag_fields=tag_fields,
+        url_fields=url_fields,
+        temporal_fields=temporal_fields,
+    )
+    if incoming is None:
+        return False
+    stored = load_db_snapshot(conn, layer_id=layer_id, npu_objectid=incoming.npu_objectid)
+    if stored is None:
+        return True
+    return stored != incoming
+
+
 def upsert_feature(
     conn: psycopg.Connection[Any],
     *,
@@ -441,17 +653,33 @@ def upsert_detail_file(
     tag_fields: set[str] | None = None,
     url_fields: set[str] | None = None,
     temporal_fields: set[str] | None = None,
+    only_if_changed: bool = False,
 ) -> UpsertStats:
-    """Parse one wget detail JSON and upsert all features in a single transaction."""
+    """Parse one wget detail JSON and upsert features in a single transaction.
+
+    When ``only_if_changed`` is True, skip features whose DB snapshot already
+    matches the incoming GeoJSON (diff mode).
+    """
     tags = tag_fields or set()
     urls = url_fields or set()
     temporals = temporal_fields or set()
     data = load_json_file(detail_path)
     features = features_from_detail(data)
     upserted = 0
+    unchanged = 0
     with psycopg.connect(database_url, row_factory=dict_row) as conn:
         try:
             for feature in features:
+                if only_if_changed and not feature_needs_update(
+                    conn,
+                    layer_id=layer_id,
+                    feature=feature,
+                    tag_fields=tags,
+                    url_fields=urls,
+                    temporal_fields=temporals,
+                ):
+                    unchanged += 1
+                    continue
                 if upsert_feature(
                     conn,
                     layer_id=layer_id,
@@ -470,7 +698,7 @@ def upsert_detail_file(
                 len(features),
             )
             raise
-    return UpsertStats(features=len(features), upserted=upserted)
+    return UpsertStats(features=len(features), upserted=upserted, unchanged=unchanged)
 
 
 def _parse_csv_set(raw: str | None) -> set[str]:
@@ -521,6 +749,40 @@ def _cmd_extract_ids(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_id_lines(text: str) -> list[int]:
+    """Parse one integer OBJECTID per non-empty line."""
+    ids: list[int] = []
+    for line in text.splitlines():
+        item = line.strip()
+        if not item:
+            continue
+        try:
+            ids.append(int(item))
+        except ValueError as exc:
+            raise SystemExit(f"Non-integer object id: {item!r}") from exc
+    return ids
+
+
+def _cmd_missing_ids(args: argparse.Namespace) -> int:
+    """Print candidate OBJECTIDs that are not yet in ``layer_objects``."""
+    database_url = args.database_url or get_settings().database_url
+    if not database_url:
+        raise SystemExit("DATABASE_URL is required")
+    if args.path:
+        candidates = _parse_id_lines(Path(args.path).read_text(encoding="utf-8"))
+    else:
+        candidates = _parse_id_lines(sys.stdin.read())
+    with psycopg.connect(database_url, row_factory=dict_row) as conn:
+        missing = missing_npu_objectids(
+            conn,
+            layer_id=args.layer_id,
+            candidates=candidates,
+        )
+    for oid in missing:
+        print(oid)
+    return 0
+
+
 def _cmd_ensure_layer(args: argparse.Namespace) -> int:
     database_url = args.database_url or get_settings().database_url
     if not database_url:
@@ -553,11 +815,13 @@ def _cmd_upsert_file(args: argparse.Namespace) -> int:
         tag_fields=_parse_csv_set(args.tag_fields or settings.npu_tag_fields),
         url_fields=_parse_csv_set(args.url_fields or settings.npu_url_fields),
         temporal_fields=_parse_csv_set(args.temporal_fields or settings.npu_temporal_fields),
+        only_if_changed=bool(args.only_if_changed),
     )
     logger.info(
-        "npu_upsert_ok features=%s upserted=%s path=%s",
+        "npu_upsert_ok features=%s upserted=%s unchanged=%s path=%s",
         stats.features,
         stats.upserted,
+        stats.unchanged,
         args.path,
     )
     print(f"{stats.upserted}/{stats.features}")
@@ -586,6 +850,20 @@ def cli(argv: list[str] | None = None) -> int:
     p_ids.add_argument("path", help="Path to pamatky.json (ID list)")
     p_ids.set_defaults(func=_cmd_extract_ids)
 
+    p_miss = sub.add_parser(
+        "missing-ids",
+        help="Filter OBJECTIDs: print those not yet in layer_objects",
+    )
+    p_miss.add_argument(
+        "path",
+        nargs="?",
+        default="",
+        help="Optional file of one OBJECTID per line (default: stdin)",
+    )
+    p_miss.add_argument("--layer-id", required=True)
+    p_miss.add_argument("--database-url", default="")
+    p_miss.set_defaults(func=_cmd_missing_ids)
+
     p_ensure = sub.add_parser("ensure-layer", help="Upsert map_layers row; print UUID")
     p_ensure.add_argument("--layer-url", required=True)
     p_ensure.add_argument("--name", default="")
@@ -599,6 +877,11 @@ def cli(argv: list[str] | None = None) -> int:
     p_up.add_argument("--tag-fields", default="")
     p_up.add_argument("--url-fields", default="")
     p_up.add_argument("--temporal-fields", default="")
+    p_up.add_argument(
+        "--only-if-changed",
+        action="store_true",
+        help="Skip features whose stored snapshot already matches (diff mode)",
+    )
     p_up.set_defaults(func=_cmd_upsert_file)
 
     args = parser.parse_args(argv)
