@@ -102,6 +102,41 @@ def test_layer_exposes_source_fields(client: TestClient) -> None:
     assert fetched["source_key"] is None
 
 
+def test_object_exposes_npu_attribute_columns(client: TestClient) -> None:
+    """Object create/read/update round-trips NPÚ columns (stub mode)."""
+    layer_id = client.post("/layers", json={"name": "NKP"}).json()["id"]
+    created = client.post(
+        f"/layers/{layer_id}/objects",
+        json={
+            "geometry": {"type": "Point", "coordinates": [13.9, 49.26]},
+            "npu_objectid": 34228,
+            "pr_stav_id": 84095,
+            "subtyp": 12,
+            "pr_stav_nazev": "Hrad Strakonice",
+            "typ_ochrany_kod": "NKP",
+            "url_ext": "https://pamatkovykatalog.cz/pravni-ochrana/x-84095",
+            "verejny": 1,
+            "hlavni_prvek_id": 15155748,
+        },
+    )
+    assert created.status_code == 201
+    body = created.json()
+    assert body["npu_objectid"] == 34228
+    assert body["pr_stav_id"] == 84095
+    assert body["subtyp"] == 12
+    assert body["pr_stav_nazev"] == "Hrad Strakonice"
+    assert body["typ_ochrany_kod"] == "NKP"
+    assert body["platn_od"] is None
+    fetched = client.get(f"/objects/{body['id']}").json()
+    assert fetched["hlavni_prvek_id"] == 15155748
+    patched = client.patch(
+        f"/objects/{body['id']}",
+        json={"hlavni_prvek": "1000146986 - hrad Strakonice"},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["hlavni_prvek"].startswith("1000146986")
+
+
 def test_layer_object_property_tag_url_flow(client: TestClient) -> None:
     """End-to-end stub flow across core tables."""
     layer = client.post("/layers", json={"name": "Parks"}).json()
@@ -112,6 +147,8 @@ def test_layer_object_property_tag_url_flow(client: TestClient) -> None:
         json={"geometry": {"type": "Point", "coordinates": [14.4, 50.1]}},
     ).json()
     object_id = obj["id"]
+    assert "npu_objectid" in obj
+    assert obj["npu_objectid"] is None
 
     text_prop = client.post(
         f"/objects/{object_id}/properties",

@@ -40,12 +40,14 @@ CREATE UNIQUE INDEX uq_map_layers_source_key
 
 -- Layer objects (= GeoJSON features); npu_objectid = NPÚ sync upsert key
 -- geometry JSONB kept for API; geom filled by migration 003 + app dual-write
+-- Definitive NPÚ attribute columns: migrations/004_npu_attribute_columns.sql
 CREATE TABLE layer_objects (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     layer_id UUID NOT NULL REFERENCES map_layers (id) ON DELETE CASCADE,
     npu_objectid BIGINT,
     geometry JSONB NOT NULL,
     -- geom geometry(Geometry, 4326) added in migrations/003_postgis_layer_objects.sql
+    -- NPÚ attribute columns (pr_stav_id, subtyp, platn_od, …) in migration 004
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT layer_objects_geometry_object CHECK (jsonb_typeof(geometry) = 'object'),

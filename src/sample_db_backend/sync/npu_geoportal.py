@@ -39,6 +39,13 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from sample_db_backend.config import get_settings
+from sample_db_backend.sync.npu_columns import (
+    UPSERT_COLUMN_SQL,
+    UPSERT_PLACEHOLDERS_SQL,
+    UPSERT_UPDATE_SQL,
+    extract_npu_column_values,
+    ordered_column_params,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -564,23 +571,30 @@ def upsert_feature(
         return False
 
     geojson_text = json.dumps(geometry, separators=(",", ":"), ensure_ascii=False)
+    column_values = extract_npu_column_values(props, parse_temporal=_parse_temporal)
+    column_params = ordered_column_params(column_values)
     row = conn.execute(
-        """
-        INSERT INTO layer_objects (layer_id, npu_objectid, geometry, geom)
+        f"""
+        INSERT INTO layer_objects (
+            layer_id, npu_objectid, geometry, geom,
+            {UPSERT_COLUMN_SQL}
+        )
         VALUES (
             %s,
             %s,
             %s,
-            ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)
+            ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326),
+            {UPSERT_PLACEHOLDERS_SQL}
         )
         ON CONFLICT (layer_id, npu_objectid) WHERE npu_objectid IS NOT NULL
         DO UPDATE SET
             geometry = EXCLUDED.geometry,
             geom = EXCLUDED.geom,
+            {UPSERT_UPDATE_SQL},
             updated_at = now()
         RETURNING id
         """,
-        (layer_id, npu_id, Jsonb(geometry), geojson_text),
+        (layer_id, npu_id, Jsonb(geometry), geojson_text, *column_params),
     ).fetchone()
     assert row is not None
     object_id = row["id"]
