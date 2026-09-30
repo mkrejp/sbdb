@@ -82,7 +82,7 @@ def delete_layer(layer_id: UUID) -> None:
 @router.get("/layers/{layer_id}/objects", response_model=ObjectList, tags=["objects"])
 def list_layer_objects(
     layer_id: UUID,
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=100),
 ) -> ObjectList:
     """List objects on a layer."""
     try:
@@ -108,7 +108,7 @@ def create_layer_object(layer_id: UUID, payload: ObjectCreate) -> LayerObject:
 @router.get("/objects", response_model=ObjectList, tags=["objects"])
 def list_objects(
     tag: str | None = None,
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=100),
 ) -> ObjectList:
     """List objects, optionally filtered by tag name."""
     return ObjectList(items=svc.list_objects(tag=tag, limit=limit))
@@ -200,7 +200,7 @@ def delete_property(property_id: UUID) -> None:
 
 
 @router.get("/tags", response_model=TagList, tags=["tags"])
-def list_tags(limit: int = Query(default=100, ge=1, le=500)) -> TagList:
+def list_tags(limit: int = Query(default=100, ge=1, le=100)) -> TagList:
     """List classification tags."""
     return TagList(items=svc.list_tags(limit=limit))
 

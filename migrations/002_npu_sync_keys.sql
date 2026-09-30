@@ -1,5 +1,5 @@
 -- Migration 002: NPÚ Geoportal sync keys + layer source metadata
--- Adds identity binding for paged ArcGIS FeatureServer upserts (see docs/npu-geoportal-sync.md).
+-- Adds identity binding for paged ArcGIS MapServer upserts (see docs/npu-geoportal-sync.md).
 
 ALTER TABLE map_layers
     ADD COLUMN IF NOT EXISTS source_key TEXT,
@@ -19,6 +19,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_layer_objects_layer_npu_objectid
 COMMENT ON COLUMN layer_objects.npu_objectid IS
     'NPÚ / ArcGIS OBJECTID (or numeric id) used as sync upsert key';
 COMMENT ON COLUMN map_layers.source_key IS
-    'Stable ingest key, e.g. npu:<FeatureServer-layer-path>';
+    'Stable ingest key, e.g. npu:<MapServer-layer-path>';
 COMMENT ON COLUMN map_layers.source_url IS
-    'ArcGIS FeatureServer/MapServer layer root URL used for metadata + /query';
+    'ArcGIS MapServer layer root URL used for metadata + /query';

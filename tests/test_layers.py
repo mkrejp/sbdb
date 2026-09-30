@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -38,7 +39,67 @@ def test_health_ok_without_database(client: TestClient) -> None:
     """Health ok when DB skipped."""
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["database"] == "skipped"
+    body = response.json()
+    assert body["database"] == "skipped"
+    assert body["status"] == "ok"
+
+
+def test_empty_lists_return_200(client: TestClient) -> None:
+    """Empty collections return 200 with empty items."""
+    assert client.get("/layers").json()["items"] == []
+    assert client.get("/objects").json()["items"] == []
+    assert client.get("/tags").json()["items"] == []
+
+
+def test_missing_resources_404(client: TestClient) -> None:
+    """Unknown IDs return 404."""
+    missing = str(uuid4())
+    assert client.get(f"/layers/{missing}").status_code == 404
+    assert client.get(f"/objects/{missing}").status_code == 404
+    assert client.get(f"/tags/{missing}").status_code == 404
+    assert client.get(f"/properties/{missing}").status_code == 404
+    assert client.get(f"/urls/{missing}").status_code == 404
+
+
+def test_blank_layer_name_422(client: TestClient) -> None:
+    """Blank names return 422."""
+    assert client.post("/layers", json={"name": "  "}).status_code == 422
+
+
+def test_tag_conflict_409(client: TestClient) -> None:
+    """Duplicate tag names return 409."""
+    assert client.post("/tags", json={"name": "park"}).status_code == 201
+    assert client.post("/tags", json={"name": "park"}).status_code == 409
+
+
+def test_property_conflict_409(client: TestClient) -> None:
+    """Duplicate property keys on an object return 409."""
+    layer_id = client.post("/layers", json={"name": "L"}).json()["id"]
+    object_id = client.post(
+        f"/layers/{layer_id}/objects",
+        json={"geometry": {"type": "Point", "coordinates": [0, 0]}},
+    ).json()["id"]
+    payload = {"key": "label", "value_type": "text", "text_value": "a"}
+    assert client.post(f"/objects/{object_id}/properties", json=payload).status_code == 201
+    assert client.post(f"/objects/{object_id}/properties", json=payload).status_code == 409
+
+
+def test_list_limit_capped(client: TestClient) -> None:
+    """List endpoints reject limit above 100."""
+    assert client.get("/layers", params={"limit": 101}).status_code == 422
+    assert client.get("/objects", params={"limit": 101}).status_code == 422
+    assert client.get("/tags", params={"limit": 101}).status_code == 422
+
+
+def test_layer_exposes_source_fields(client: TestClient) -> None:
+    """Layer reads include source_key / source_url (null for manual creates)."""
+    layer = client.post("/layers", json={"name": "Manual"}).json()
+    assert "source_key" in layer
+    assert "source_url" in layer
+    assert layer["source_key"] is None
+    assert layer["source_url"] is None
+    fetched = client.get(f"/layers/{layer['id']}").json()
+    assert fetched["source_key"] is None
 
 
 def test_layer_object_property_tag_url_flow(client: TestClient) -> None:
@@ -97,8 +158,3 @@ def test_layer_object_property_tag_url_flow(client: TestClient) -> None:
 
     assert client.delete(f"/layers/{layer_id}").status_code == 204
     assert client.get(f"/objects/{object_id}").status_code == 404
-
-
-def test_blank_layer_name_422(client: TestClient) -> None:
-    """Blank names return 422."""
-    assert client.post("/layers", json={"name": "  "}).status_code == 422

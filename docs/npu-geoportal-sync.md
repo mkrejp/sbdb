@@ -69,4 +69,26 @@ Identity: prefer `properties.OBJECTID` (this layer) as the **stable external key
 | `platn_od`, `platn_do`, `aktual`, `datumStavuOchrany` | `layer_object_properties` (`temporal`) |
 | Other scalars (e.g. `nazev` / display fields) | `layer_object_properties` (`text`) |
 
-Free tier: page → upsert; skip full mirror from blocked egress environments — run sync from a network that can reach `geoportal.npu.cz`.
+## Field-config defaults (`NPU_*`)
+
+Config / `.env.example` defaults match the CP_UAP_PVO mapping above:
+
+| Env | Default fields |
+| --- | --- |
+| `NPU_TAG_FIELDS` | `Subtyp,typOchranyKod,typOchranyNazev,fazeOchranyKod,fazeOchranyNazev,PrStavNazev` |
+| `NPU_URL_FIELDS` | `urlExt,urlInt` |
+| `NPU_TEMPORAL_FIELDS` | `platn_od,platn_do,aktual,datumStavuOchrany` |
+
+CLI headers: `User-Agent: YourSyncBot/1.0`, `Accept: application/json`. Retries with backoff on HTTP 429/5xx.
+
+## Where to run live sync
+
+Free tier: page → upsert; **do not** full-mirror from cloud agents whose IPs are WAF-blocked on `/query`. Prefer the user’s **WSL** checkout:
+
+```bash
+# /home/cursor/dev/genesis
+export DATABASE_URL=…   # Supabase pooler
+uv run sample-db-npu-sync
+```
+
+CI and cloud agents must mock NPÚ (`tests/test_npu_sync.py`); never hit `geoportal.npu.cz` from Actions.
