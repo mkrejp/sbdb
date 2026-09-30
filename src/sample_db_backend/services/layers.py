@@ -38,6 +38,11 @@ from sample_db_backend.schemas import (
     TagCreate,
     TagUpdate,
 )
+from sample_db_backend.sync.npu_columns import NPU_COLUMN_NAMES
+
+# NPÚ promoted columns + sync key exposed on LayerObject
+_NPU_ATTR_COLS: tuple[str, ...] = ("npu_objectid", *NPU_COLUMN_NAMES)
+_NPU_ATTR_SQL = ", ".join(_NPU_ATTR_COLS)
 
 
 class NotFoundError(Exception):
@@ -203,6 +208,7 @@ def delete_layer(layer_id: UUID) -> None:
 _OBJECT_SELECT = (
     "id, layer_id, "
     "COALESCE(ST_AsGeoJSON(geom)::jsonb, geometry) AS geometry, "
+    f"{_NPU_ATTR_SQL}, "
     "created_at, updated_at"
 )
 
@@ -210,6 +216,18 @@ _OBJECT_SELECT = (
 def _geojson_text(geometry: dict[str, Any]) -> str:
     """Serialize GeoJSON for ST_GeomFromGeoJSON."""
     return json.dumps(geometry, separators=(",", ":"), ensure_ascii=False)
+
+
+def _npu_attr_defaults() -> dict[str, Any]:
+    """Null defaults for stub / create paths."""
+    return {col: None for col in _NPU_ATTR_COLS}
+
+
+def _npu_attrs_from_payload(payload: ObjectCreate | ObjectUpdate) -> dict[str, Any]:
+    """Extract set NPÚ attribute fields from a create/update payload."""
+    data = payload.model_dump(exclude_unset=True)
+    data.pop("geometry", None)
+    return {k: v for k, v in data.items() if k in _NPU_ATTR_COLS}
 
 
 def list_objects(
@@ -242,6 +260,7 @@ def list_objects(
         params.append(tag)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
+    npu_select = ", ".join(f"o.{col}" for col in _NPU_ATTR_COLS)
     with get_connection() as conn:
         rows = conn.execute(
             f"""
@@ -249,6 +268,7 @@ def list_objects(
                 o.id,
                 o.layer_id,
                 COALESCE(ST_AsGeoJSON(o.geom)::jsonb, o.geometry) AS geometry,
+                {npu_select},
                 o.created_at,
                 o.updated_at
             FROM layer_objects o
@@ -283,31 +303,37 @@ def get_object(object_id: UUID) -> LayerObject:
 
 
 def create_object(layer_id: UUID, payload: ObjectCreate) -> LayerObject:
-    """Create an object under a layer (dual-write JSONB + PostGIS)."""
+    """Create an object under a layer (dual-write JSONB + PostGIS + NPÚ cols)."""
     get_layer(layer_id)
+    npu_attrs = {**_npu_attr_defaults(), **_npu_attrs_from_payload(payload)}
     if not database_configured():
         now = _now()
         row = {
             "id": uuid4(),
             "layer_id": layer_id,
             "geometry": payload.geometry,
+            **npu_attrs,
             "created_at": now,
             "updated_at": now,
         }
         stub_objects().append(row)
         return _object(row)
+    col_names = ", ".join(_NPU_ATTR_COLS)
+    placeholders = ", ".join("%s" for _ in _NPU_ATTR_COLS)
+    values = [npu_attrs[col] for col in _NPU_ATTR_COLS]
     with get_connection() as conn:
         row = conn.execute(
             f"""
-            INSERT INTO layer_objects (layer_id, geometry, geom)
+            INSERT INTO layer_objects (layer_id, geometry, geom, {col_names})
             VALUES (
                 %s,
                 %s,
-                ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)
+                ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326),
+                {placeholders}
             )
             RETURNING {_OBJECT_SELECT}
             """,
-            (layer_id, as_jsonb(payload.geometry), _geojson_text(payload.geometry)),
+            (layer_id, as_jsonb(payload.geometry), _geojson_text(payload.geometry), *values),
         ).fetchone()
         conn.commit()
     assert row is not None
@@ -315,7 +341,7 @@ def create_object(layer_id: UUID, payload: ObjectCreate) -> LayerObject:
 
 
 def update_object(object_id: UUID, payload: ObjectUpdate) -> LayerObject:
-    """Update object geometry (dual-write JSONB + PostGIS)."""
+    """Update object geometry and/or NPÚ columns (dual-write geom when set)."""
     data = payload.model_dump(exclude_unset=True)
     if not data:
         return get_object(object_id)
@@ -326,17 +352,30 @@ def update_object(object_id: UUID, payload: ObjectUpdate) -> LayerObject:
                 row["updated_at"] = _now()
                 return _object(row)
         raise NotFoundError(str(object_id))
-    geometry = data["geometry"]
+    sets: list[str] = []
+    values: list[Any] = []
+    if "geometry" in data:
+        geometry = data["geometry"]
+        sets.append("geometry = %s")
+        values.append(as_jsonb(geometry))
+        sets.append("geom = ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)")
+        values.append(_geojson_text(geometry))
+    for col in _NPU_ATTR_COLS:
+        if col in data:
+            sets.append(f"{col} = %s")
+            values.append(data[col])
+    if not sets:
+        return get_object(object_id)
+    values.append(object_id)
     with get_connection() as conn:
         row = conn.execute(
             f"""
             UPDATE layer_objects
-            SET geometry = %s,
-                geom = ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)
+            SET {", ".join(sets)}
             WHERE id = %s
             RETURNING {_OBJECT_SELECT}
             """,
-            (as_jsonb(geometry), _geojson_text(geometry), object_id),
+            values,
         ).fetchone()
         conn.commit()
     if row is None:

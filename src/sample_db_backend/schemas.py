@@ -86,8 +86,40 @@ class LayerList(BaseModel):
 # --- objects -----------------------------------------------------------------
 
 
-class ObjectCreate(BaseModel):
-    """Create a layer object with GeoJSON geometry."""
+class NpuObjectAttrs(BaseModel):
+    """Definitive NPÚ attributes promoted onto ``layer_objects`` columns.
+
+    ``OBJECTID`` is exposed as ``npu_objectid`` (existing sync key). All fields
+    nullable — present when mirrored from NPÚ or set explicitly.
+    """
+
+    npu_objectid: int | None = None
+    pr_stav_id: int | None = None
+    subtyp: int | None = None
+    platn_od: datetime | None = None
+    platn_do: datetime | None = None
+    aktual: datetime | None = None
+    akt_stav_id: int | None = None
+    pravni_akt_id: int | None = None
+    pravni_stav_id: int | None = None
+    pravni_akt_pravniho_stavu_id: int | None = None
+    zmena_uzemniho_rozsahu: int | None = None
+    datum_stavu_ochrany: datetime | None = None
+    hlavni_prvek: str | None = None
+    pr_stav_nazev: str | None = None
+    rejstrikove_cislo_uskp: str | None = None
+    typ_ochrany_kod: str | None = None
+    typ_ochrany_nazev: str | None = None
+    upresneni_typu_ochrany: str | None = None
+    url_ext: str | None = None
+    url_int: str | None = None
+    xx_prohlaseni: str | None = None
+    verejny: int | None = None
+    hlavni_prvek_id: int | None = None
+
+
+class ObjectCreate(NpuObjectAttrs):
+    """Create a layer object with GeoJSON geometry (+ optional NPÚ columns)."""
 
     geometry: dict[str, Any]
 
@@ -100,8 +132,8 @@ class ObjectCreate(BaseModel):
         return value
 
 
-class ObjectUpdate(BaseModel):
-    """Partial update for object geometry."""
+class ObjectUpdate(NpuObjectAttrs):
+    """Partial update for object geometry and/or NPÚ columns."""
 
     geometry: dict[str, Any] | None = None
 
@@ -116,8 +148,8 @@ class ObjectUpdate(BaseModel):
         return value
 
 
-class LayerObject(BaseModel):
-    """Layer object (GeoJSON feature)."""
+class LayerObject(NpuObjectAttrs):
+    """Layer object (GeoJSON feature) with optional NPÚ attribute columns."""
 
     model_config = ConfigDict(from_attributes=True)
 

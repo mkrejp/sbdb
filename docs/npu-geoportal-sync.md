@@ -110,11 +110,46 @@ Diff mode re-fetches details for every ID and runs `upsert-file --only-if-change
 | --- | --- |
 | Layer root + name | `map_layers` |
 | Feature geometry | `layer_objects.geom` (PostGIS EPSG:4326) + `geometry` JSONB dual-write |
-| `OBJECTID` | `layer_objects.npu_objectid` |
+| `OBJECTID` | `layer_objects.npu_objectid` (sync upsert key — not duplicated) |
+| Definitive attributes (Marek locked set) | Typed columns on `layer_objects` **and** dual-write to tags/urls/properties (see below) |
+| Extra / unknown scalars | `layer_object_properties` only (`text` / `temporal`) |
+
+### Definitive `layer_objects` columns (`migrations/004_npu_attribute_columns.sql`)
+
+| NPÚ key | SQL column | Type |
+| --- | --- | --- |
+| OBJECTID | `npu_objectid` | `BIGINT` (existing) |
+| PrStav_id | `pr_stav_id` | `BIGINT` |
+| Subtyp | `subtyp` | `INTEGER` |
+| platn_od | `platn_od` | `TIMESTAMPTZ` |
+| platn_do | `platn_do` | `TIMESTAMPTZ` |
+| aktual | `aktual` | `TIMESTAMPTZ` |
+| AktStav_id | `akt_stav_id` | `BIGINT` |
+| pravniAktId | `pravni_akt_id` | `BIGINT` |
+| pravniStavId | `pravni_stav_id` | `BIGINT` |
+| pravniAktPravnihoStavuId | `pravni_akt_pravniho_stavu_id` | `BIGINT` |
+| zmenaUzemnihoRozsahu | `zmena_uzemniho_rozsahu` | `INTEGER` |
+| datumStavuOchrany | `datum_stavu_ochrany` | `TIMESTAMPTZ` |
+| hlavniPrvek | `hlavni_prvek` | `TEXT` |
+| PrStavNazev | `pr_stav_nazev` | `TEXT` |
+| rejstrikoveCisloUSKP | `rejstrikove_cislo_uskp` | `TEXT` |
+| typOchranyKod | `typ_ochrany_kod` | `TEXT` |
+| typOchranyNazev | `typ_ochrany_nazev` | `TEXT` |
+| upresneniTypuOchrany | `upresneni_typu_ochrany` | `TEXT` |
+| urlExt | `url_ext` | `TEXT` |
+| urlInt | `url_int` | `TEXT` |
+| xxProhlaseni | `xx_prohlaseni` | `TEXT` |
+| verejny | `verejny` | `INTEGER` |
+| hlavniPrvekId | `hlavni_prvek_id` | `BIGINT` |
+
+Dual-write policy: sync fills the columns **and** continues classifying into tags / urls / `layer_object_properties` (nothing lost for unknown keys).
+
+| NPÚ (classify path) | Child table |
+| --- | --- |
 | `Subtyp`, `typOchranyKod`, `typOchranyNazev`, `fazeOchranyKod`, `fazeOchranyNazev`, `PrStavNazev` | `tags` / `layer_object_tags` |
 | `urlExt`, `urlInt` | `layer_object_urls` |
 | `platn_od`, `platn_do`, `aktual`, `datumStavuOchrany` | `layer_object_properties` (`temporal`) — year ∈ `[1000, now+5]`, UTC; unparseable → `text` |
-| Other scalars (e.g. `nazev`) | `layer_object_properties` (`text`) |
+| Other scalars (e.g. `nazev`, `chraneno`) | `layer_object_properties` (`text`) |
 
 ## Field-config defaults (`NPU_*`)
 

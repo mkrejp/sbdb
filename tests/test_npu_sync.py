@@ -233,17 +233,42 @@ class _FakeConn:
         del args
 
 
+def test_npu_column_extract_from_marek_fixture() -> None:
+    """Definitive NPÚ attrs coerce onto typed column values (OBJECTID separate)."""
+    from sample_db_backend.sync.npu_columns import (
+        NPU_ATTRIBUTE_COLUMNS,
+        extract_npu_column_values,
+    )
+    from sample_db_backend.sync.npu_geoportal import _parse_temporal
+
+    feature = features_from_detail(load_json_file(FIXTURES / "detail.geojson"))[0]
+    values = extract_npu_column_values(feature["properties"], parse_temporal=_parse_temporal)
+    assert len(NPU_ATTRIBUTE_COLUMNS) == 22
+    assert "npu_objectid" not in values  # OBJECTID handled separately
+    assert values["pr_stav_id"] == 84095
+    assert values["subtyp"] == 12
+    assert values["hlavni_prvek"] == "1000146986 - hrad Strakonice"
+    assert values["pr_stav_nazev"] == "Hrad Strakonice"
+    assert values["typ_ochrany_kod"] == "NKP"
+    assert values["url_ext"].startswith("https://pamatkovykatalog.cz/")
+    assert values["verejny"] == 1
+    assert values["hlavni_prvek_id"] == 15155748
+    assert isinstance(values["platn_od"], datetime)
+    assert "platn_do" not in values  # null in fixture
+    assert "xx_prohlaseni" not in values
+
+
 def test_upsert_feature_writes_object_and_children() -> None:
-    """Upsert inserts layer_objects (PostGIS + JSONB) and derived tag/url/text rows."""
+    """Upsert inserts layer_objects (PostGIS + NPÚ cols + JSONB) and children."""
     conn = _FakeConn()
     feature = features_from_detail(load_json_file(FIXTURES / "detail.geojson"))[0]
     ok = upsert_feature(
         conn,  # type: ignore[arg-type]
         layer_id=uuid4(),
         feature=feature,
-        tag_fields={"Subtyp"},
-        url_fields={"urlExt"},
-        temporal_fields=set(),
+        tag_fields={"Subtyp", "typOchranyKod", "PrStavNazev"},
+        url_fields={"urlExt", "urlInt"},
+        temporal_fields={"platn_od", "platn_do", "aktual", "datumStavuOchrany"},
     )
     assert ok is True
     joined = " ".join(s[0] for s in conn.statements).lower()
@@ -251,6 +276,8 @@ def test_upsert_feature_writes_object_and_children() -> None:
     assert "st_geomfromgeojson" in joined
     assert "st_setsrid" in joined
     assert "geom" in joined
+    assert "pr_stav_id" in joined
+    assert "hlavni_prvek" in joined
     assert "insert into tags" in joined
     assert "layer_object_urls" in joined
     assert "layer_object_properties" in joined
@@ -258,7 +285,10 @@ def test_upsert_feature_writes_object_and_children() -> None:
         params for sql, params in conn.statements if "insert into layer_objects" in sql.lower()
     )
     assert insert_params is not None
-    assert len(insert_params) == 4  # layer_id, npu_id, Jsonb, geojson text
+    # layer_id, npu_id, Jsonb, geojson text, + 22 NPÚ attribute columns
+    assert len(insert_params) == 4 + 22
+    assert insert_params[1] == 101  # npu_objectid
+    assert insert_params[4] == 84095  # pr_stav_id (first promoted column)
 
 
 def test_upsert_detail_file_commits_once(monkeypatch: MonkeyPatch) -> None:
@@ -316,14 +346,15 @@ def test_snapshot_from_feature_includes_tags_and_urls() -> None:
     feature = features_from_detail(load_json_file(FIXTURES / "detail.geojson"))[0]
     snap = snapshot_from_feature(
         feature,
-        tag_fields={"Subtyp"},
+        tag_fields={"Subtyp", "typOchranyKod"},
         url_fields={"urlExt"},
         temporal_fields=set(),
     )
     assert snap is not None
     assert snap.npu_objectid == 101
+    assert "12" in snap.tags
     assert "NKP" in snap.tags
-    assert ("urlExt", "https://npu.cz/a") in snap.urls
+    assert ("urlExt", "https://pamatkovykatalog.cz/pravni-ochrana/x-84095") in snap.urls
     assert '"type":"Point"' in snap.geometry_json
 
 
