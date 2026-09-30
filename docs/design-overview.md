@@ -116,4 +116,4 @@ Then optional: `./scripts/sample-db-npu-sync` (or `uv run sample-db-npu-sync`) f
 
 ## 7. Out of scope here
 
-Auth, PostGIS spatial ops, Storage upload helpers, Alembic, frontend map UI, live Railway deploy (stage 7).
+Auth, Storage upload helpers, Alembic, frontend map UI, bbox/intersects query endpoints (PostGIS geom is in place).
