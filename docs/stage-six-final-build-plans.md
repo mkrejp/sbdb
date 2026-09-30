@@ -153,7 +153,7 @@ Execute **WP-A → WP-E** in order unless noted parallel. Prefer draft PRs via O
 | Layer | `https://geoportal.npu.cz/arcgis/rest/services/Tematicke/CP_UAP_PVO/MapServer/0` |
 | Practices | Follow [npu-geoportal-sync.md](./npu-geoportal-sync.md) exactly — page with `resultOffset` / `resultRecordCount`; never assume one `where=1=1` returns all rows |
 | WAF | Cloud agent / some datacenter IPs get blocked on `/query` — **do not burn agent minutes** retrying full mirrors from blocked egress |
-| Preferred live sync | User **WSL** path `/home/cursor/dev/genesis` with `DATABASE_URL` + `NPU_LAYER_URL` set; `uv run sample-db-npu-sync` |
+| Preferred live sync | User **WSL** path `/home/cursor/dev/genesis` with `DATABASE_URL` + `NPU_LAYER_URL`; `timeout 300 ./scripts/sample-db-npu-sync` |
 | Self-hosted workers | Stage-5 “later” option if WSL unavailable and cloud stays blocked |
 | CI | Mock NPÚ only; never hit geoportal from Actions |
 | Scheduling | Weekly/monthly cron → **stage 7 decision**, not default in build |

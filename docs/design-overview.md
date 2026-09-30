@@ -4,7 +4,7 @@ Implementation design for the Sample DB backend. Stack: **Python FastAPI** + **P
 
 **Domain:** GeoJSON **map layers** (design artifact label: **notes-for-data-model**).
 
-**Initial fill:** [NPÚ Geoportal REST](./npu-geoportal-sync.md) via paged GeoJSON sync → upsert (`src/sample_db_backend/sync/npu_geoportal.py`).
+**Initial fill:** [NPÚ Geoportal REST](./npu-geoportal-sync.md) via bash+wget (ID list → detail) + Python upsert (`scripts/sample-db-npu-sync`, `sync/npu_geoportal.py`).
 
 Artifacts: [notes-for-data-model.sql](./notes-for-data-model.sql) · [notes-for-data-model.json](./notes-for-data-model.json) · [api-design.json](./api-design.json) · [npu-geoportal-sync.md](./npu-geoportal-sync.md)
 
@@ -16,7 +16,7 @@ Artifacts: [notes-for-data-model.sql](./notes-for-data-model.sql) · [notes-for-
 | --- | --- | --- |
 | HTTP API | `src/sample_db_backend/` | FastAPI routes, Pydantic validation (`422`) |
 | Services | `services/layers.py` | Layers / objects / typed props / tags / URLs |
-| NPÚ sync | `sync/npu_geoportal.py` | Paged MapServer fetch + upsert (CLI `sample-db-npu-sync`) |
+| NPÚ sync | `scripts/sample-db-npu-sync` + `sync/npu_geoportal.py` | Bash/wget list→detail; Python upsert (CLI `sample-db-npu-sync`) |
 | Persistence | `db.py` + SQL | `DATABASE_URL` or in-memory stub |
 | Migrations | `migrations/*.sql` | Versioned SQL (`001` schema, `002` NPÚ keys) |
 | CI | `.github/workflows/ci.yml` | Ruff + pytest |
@@ -83,7 +83,8 @@ Practices: [npu-geoportal-sync.md](./npu-geoportal-sync.md) (do not invent a dif
 | `NPU_TAG_FIELDS` / `NPU_URL_FIELDS` | Comma-separated attribute → tags / URLs |
 
 ```bash
-uv run sample-db-npu-sync
+./scripts/sample-db-npu-sync
+# or: uv run sample-db-npu-sync
 ```
 
 Requires `DATABASE_URL` + `NPU_LAYER_URL`. No secrets in git.
@@ -109,7 +110,7 @@ psql "$DATABASE_URL" -f migrations/001_create_notes_for_data_model.sql
 psql "$DATABASE_URL" -f migrations/002_npu_sync_keys.sql   # if upgrading from 001-only
 ```
 
-Then optional: `uv run sample-db-npu-sync` for initial fill. Schedule weekly/monthly later (stage 7).
+Then optional: `./scripts/sample-db-npu-sync` (or `uv run sample-db-npu-sync`) for initial fill. Schedule weekly/monthly later (stage 7).
 
 ---
 

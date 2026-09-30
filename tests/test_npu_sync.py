@@ -1,30 +1,35 @@
-"""Unit tests for NPÚ Geoportal sync helpers (mocked wget; no live network / DB)."""
+"""Unit tests for NPÚ sync — Python parse/transform + insert helpers.
+
+No live NPÚ / network. Bash wget is covered separately with a PATH mock.
+"""
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qs, urlparse
-
-import pytest
+from uuid import uuid4
 
 from sample_db_backend.sync.npu_geoportal import (
     SYNC_ACCEPT,
     SYNC_HEADERS,
     SYNC_USER_AGENT,
-    WgetError,
-    _build_wget_argv,
     classify_attribute,
     extract_npu_objectid,
-    fetch_json_with_retries,
-    fetch_layer_metadata,
-    iter_geojson_pages,
+    extract_object_ids,
+    features_from_detail,
+    load_json_file,
+    page_size,
+    parse_layer_metadata,
+    upsert_detail_file,
+    upsert_feature,
 )
 
 if TYPE_CHECKING:
+    from _pytest.capture import CaptureFixture
     from _pytest.monkeypatch import MonkeyPatch
+
+FIXTURES = Path(__file__).parent / "fixtures" / "npu"
 
 
 def test_extract_npu_objectid_prefers_objectid() -> None:
@@ -102,169 +107,34 @@ def test_classify_cp_uap_pvo_defaults() -> None:
 
 
 def test_sync_headers_identify_bot() -> None:
-    """Sync client advertises YourSyncBot/1.0."""
+    """Documented bot identity for wget User-Agent / Accept."""
     assert SYNC_USER_AGENT == "YourSyncBot/1.0"
     assert SYNC_HEADERS["User-Agent"] == "YourSyncBot/1.0"
     assert SYNC_HEADERS["Accept"] == "application/json"
     assert SYNC_ACCEPT == "application/json"
 
 
-def test_build_wget_argv_uses_dash_o() -> None:
-    """wget argv follows ``wget -O file.json url`` with UA + Accept."""
-    out = Path("/tmp/pamatky.json")
-    argv = _build_wget_argv("https://example.test/MapServer/0?f=json", out, timeout_s=60.0)
-    assert argv[0] == "wget"
-    assert argv[1] == "-O"
-    assert argv[2] == str(out)
-    assert f"--user-agent={SYNC_USER_AGENT}" in argv
-    assert f"--header=Accept: {SYNC_ACCEPT}" in argv
-    assert "--tries=1" in argv
-    assert argv[-1] == "https://example.test/MapServer/0?f=json"
-
-
-def _install_wget_mock(
-    monkeypatch: MonkeyPatch,
-    handler: Any,
-) -> list[list[str]]:
-    """Patch subprocess.run to simulate ``wget -O <file> <url>`` writing JSON.
-
-    ``handler(url)`` returns a JSON-serializable dict (success) or raises
-    ``WgetError`` / returns an int exit code via a ``("exit", code)`` tuple.
-    """
-    calls: list[list[str]] = []
-
-    def fake_run(
-        argv: list[str],
-        *,
-        capture_output: bool = False,
-        text: bool = False,
-        check: bool = False,
-    ) -> Any:
-        del capture_output, text, check
-        calls.append(list(argv))
-        assert argv[0] == "wget"
-        assert argv[1] == "-O"
-        out_path = Path(argv[2])
-        url = argv[-1]
-        result = handler(url)
-        if isinstance(result, tuple) and result and result[0] == "exit":
-            return type(
-                "Completed",
-                (),
-                {"returncode": int(result[1]), "stderr": "mock wget fail", "stdout": ""},
-            )()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(result), encoding="utf-8")
-        return type(
-            "Completed",
-            (),
-            {"returncode": 0, "stderr": "", "stdout": ""},
-        )()
-
-    monkeypatch.setattr(
-        "sample_db_backend.sync.npu_geoportal.subprocess.run",
-        fake_run,
-    )
-    return calls
-
-
-def test_fetch_metadata_and_pagination(monkeypatch: MonkeyPatch) -> None:
-    """Metadata ``?f=json`` + offset paging stops on short page (mocked wget)."""
-
-    def handler(url: str) -> dict[str, Any]:
-        parsed = urlparse(url)
-        qs = parse_qs(parsed.query)
-        path = parsed.path.rstrip("/")
-        if path.endswith("/0") and not path.endswith("/query"):
-            assert qs.get("f") == ["json"]
-            return {
-                "name": "TestLayer",
-                "maxRecordCount": 2,
-                "advancedQueryCapabilities": {"supportsPagination": True},
-            }
-        offset = int((qs.get("resultOffset") or ["0"])[0])
-        if offset == 0:
-            features = [
-                {
-                    "type": "Feature",
-                    "properties": {"OBJECTID": 1},
-                    "geometry": {"type": "Point", "coordinates": [0, 0]},
-                },
-                {
-                    "type": "Feature",
-                    "properties": {"OBJECTID": 2},
-                    "geometry": {"type": "Point", "coordinates": [1, 1]},
-                },
-            ]
-        elif offset == 2:
-            features = [
-                {
-                    "type": "Feature",
-                    "properties": {"OBJECTID": 3},
-                    "geometry": {"type": "Point", "coordinates": [2, 2]},
-                },
-            ]
-        else:
-            features = []
-        return {"type": "FeatureCollection", "features": features}
-
-    calls = _install_wget_mock(monkeypatch, handler)
-    meta = fetch_layer_metadata("https://example.test/MapServer/0")
-    assert meta.max_record_count == 2
+def test_parse_meta_and_page_size_from_fixture() -> None:
+    """Metadata fixture drives client page size (cap 1000)."""
+    meta = parse_layer_metadata(load_json_file(FIXTURES / "meta.json"))
+    assert meta.name.startswith("Národní")
+    assert meta.max_record_count == 2000
     assert meta.supports_pagination is True
-    pages = list(
-        iter_geojson_pages(
-            "https://example.test/MapServer/0",
-            page_size=2,
-        )
-    )
-    assert len(pages) == 2
-    assert len(pages[0]) == 2
-    assert len(pages[1]) == 1
-    assert all(c[1] == "-O" for c in calls)
-    assert any(c[-1].endswith("?f=json") or "f=json" in c[-1] for c in calls)
+    assert page_size(meta) == 1000
 
 
-def test_wget_retries_then_succeeds(monkeypatch: MonkeyPatch) -> None:
-    """Non-zero wget exits are retried (1+3) with backoff then succeed."""
-    sleeps: list[float] = []
-    monkeypatch.setattr(
-        "sample_db_backend.sync.npu_geoportal.time.sleep",
-        lambda s: sleeps.append(s),
-    )
-    calls = {"n": 0}
-
-    def handler(url: str) -> Any:
-        del url
-        calls["n"] += 1
-        if calls["n"] < 3:
-            return ("exit", 8)
-        return {"ok": True}
-
-    _install_wget_mock(monkeypatch, handler)
-    payload = fetch_json_with_retries("https://example.test/x")
-    assert payload == {"ok": True}
-    assert calls["n"] == 3
-    assert len(sleeps) == 2
+def test_extract_object_ids_from_list_fixture() -> None:
+    """returnIdsOnly pamatky.json → OBJECTID list."""
+    ids = extract_object_ids(load_json_file(FIXTURES / "pamatky-ids.json"))
+    assert ids == [101, 102, 103]
+    assert extract_object_ids(load_json_file(FIXTURES / "pamatky-ids-empty.json")) == []
 
 
-def test_wget_retries_exhausted(monkeypatch: MonkeyPatch) -> None:
-    """After 4 failed attempts the last WgetError is raised."""
-    sleeps: list[float] = []
-    monkeypatch.setattr(
-        "sample_db_backend.sync.npu_geoportal.time.sleep",
-        lambda s: sleeps.append(s),
-    )
-
-    def handler(url: str) -> Any:
-        del url
-        return ("exit", 8)
-
-    _install_wget_mock(monkeypatch, handler)
-    with pytest.raises(WgetError) as excinfo:
-        fetch_json_with_retries("https://example.test/fail")
-    assert excinfo.value.exit_code == 8
-    assert len(sleeps) == 3  # retries after attempts 1–3; 4th fails without sleep
+def test_features_from_detail_fixture() -> None:
+    """Detail GeoJSON FeatureCollection → feature list."""
+    features = features_from_detail(load_json_file(FIXTURES / "detail.geojson"))
+    assert len(features) == 2
+    assert extract_npu_objectid(features[0]["properties"]) == 101
 
 
 def test_config_defaults_match_cp_uap_pvo() -> None:
@@ -277,3 +147,123 @@ def test_config_defaults_match_cp_uap_pvo() -> None:
     assert "Subtyp" in (settings.npu_tag_fields or "")
     assert "urlExt" in (settings.npu_url_fields or "")
     assert "platn_od" in (settings.npu_temporal_fields or "")
+
+
+class _FakeResult:
+    """Minimal stand-in for psycopg execute result."""
+
+    def __init__(self, row: dict[str, Any] | None) -> None:
+        self._row = row
+
+    def fetchone(self) -> dict[str, Any] | None:
+        """Return the prepared row."""
+        return self._row
+
+
+class _FakeConn:
+    """In-memory fake connection recording SQL for upsert tests."""
+
+    def __init__(self) -> None:
+        self.statements: list[tuple[str, tuple[Any, ...] | None]] = []
+        self._object_id = uuid4()
+
+    def execute(self, sql: str, params: tuple[Any, ...] | None = None) -> _FakeResult:
+        """Record statement; return plausible RETURNING rows."""
+        self.statements.append((sql, params))
+        lowered = " ".join(sql.lower().split())
+        if "insert into layer_objects" in lowered:
+            return _FakeResult({"id": self._object_id})
+        if "insert into tags" in lowered:
+            return _FakeResult({"id": uuid4()})
+        return _FakeResult(None)
+
+    def commit(self) -> None:
+        """No-op commit."""
+
+    def rollback(self) -> None:
+        """No-op rollback."""
+
+    def __enter__(self) -> _FakeConn:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        del args
+
+
+def test_upsert_feature_writes_object_and_children() -> None:
+    """Upsert inserts layer_objects and derived tag/url/text rows."""
+    conn = _FakeConn()
+    feature = features_from_detail(load_json_file(FIXTURES / "detail.geojson"))[0]
+    ok = upsert_feature(
+        conn,  # type: ignore[arg-type]
+        layer_id=uuid4(),
+        feature=feature,
+        tag_fields={"Subtyp"},
+        url_fields={"urlExt"},
+        temporal_fields=set(),
+    )
+    assert ok is True
+    joined = " ".join(s[0] for s in conn.statements).lower()
+    assert "insert into layer_objects" in joined
+    assert "insert into tags" in joined
+    assert "layer_object_urls" in joined
+    assert "layer_object_properties" in joined
+
+
+def test_upsert_detail_file_commits_once(monkeypatch: MonkeyPatch) -> None:
+    """upsert_detail_file opens one connection and commits the batch."""
+    fake = _FakeConn()
+    commits = {"n": 0}
+
+    def fake_connect(*args: Any, **kwargs: Any) -> _FakeConn:
+        del args, kwargs
+        return fake
+
+    def counting_commit(self: _FakeConn) -> None:
+        commits["n"] += 1
+
+    monkeypatch.setattr(
+        "sample_db_backend.sync.npu_geoportal.psycopg.connect",
+        fake_connect,
+    )
+    monkeypatch.setattr(_FakeConn, "commit", counting_commit)
+
+    stats = upsert_detail_file(
+        database_url="postgresql://unused",
+        layer_id=uuid4(),
+        detail_path=FIXTURES / "detail.geojson",
+        tag_fields={"Subtyp"},
+        url_fields={"urlExt"},
+    )
+    assert stats.features == 2
+    assert stats.upserted == 2
+    assert commits["n"] == 1
+
+
+def test_cli_extract_ids(capsys: CaptureFixture[str]) -> None:
+    """CLI extract-ids prints one OBJECTID per line."""
+    from sample_db_backend.sync.npu_geoportal import cli
+
+    rc = cli(["extract-ids", str(FIXTURES / "pamatky-ids.json")])
+    assert rc == 0
+    assert capsys.readouterr().out.strip().splitlines() == ["101", "102", "103"]
+
+
+def test_cli_page_size(capsys: CaptureFixture[str]) -> None:
+    """CLI page-size prints capped page size."""
+    from sample_db_backend.sync.npu_geoportal import cli
+
+    rc = cli(["page-size", str(FIXTURES / "meta.json")])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "1000"
+
+
+def test_module_has_no_wget_or_httpx_imports() -> None:
+    """Happy-path Python module must not import HTTP clients for NPÚ."""
+    import sample_db_backend.sync.npu_geoportal as mod
+
+    src = Path(mod.__file__).read_text(encoding="utf-8")
+    assert "import httpx" not in src
+    assert "import requests" not in src
+    assert "subprocess" not in src
+    assert "_wget" not in src

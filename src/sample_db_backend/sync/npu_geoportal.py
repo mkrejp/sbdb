@@ -1,44 +1,35 @@
-"""NPÚ Geoportal REST → Postgres mirror (safe pagination).
+"""NPÚ Geoportal sync — Python side: JSON parse/transform + Postgres upserts.
 
-Follows docs/npu-geoportal-sync.md:
-- Read MapServer layer metadata for maxRecordCount / supportsPagination
-- Page with resultOffset + resultRecordCount (client cap ≤1000)
-- Request GeoJSON outSR=4326
-- Upsert by NPÚ OBJECTID/id into layer_objects.npu_objectid
-- One DB transaction per page; stream page → upsert
-- HTTP via GNU wget (not httpx) — WAF-friendly from WSL
-- Headers: User-Agent YourSyncBot/1.0, Accept application/json
-- Retry failed wget fetches with exponential backoff
-  (1 try + 3 retries = 4 attempts per URL)
+HTTP fetches are owned by the bash orchestrator (``scripts/sample-db-npu-sync``)
+via ``wget -O``. This module never calls wget/httpx/requests for NPÚ.
 
-Usage (prefer user WSL when cloud IPs are WAF-blocked)::
+Bash flow (Marek):
+  1. wget object **list** JSON (``returnIdsOnly`` pages → ``pamatky.json``)
+  2. for each id (or small batch): wget **detail** GeoJSON
+  3. Python transform + insert/upsert into destination Postgres
 
-    # /home/cursor/dev/genesis
-    uv run sample-db-npu-sync
+CLI (invoked by bash)::
 
-Env:
-    DATABASE_URL              required for upsert
-    NPU_LAYER_URL             MapServer *layer root* (…/MapServer/0); locked CP_UAP_PVO default
-    NPU_LAYER_NAME            optional display name for map_layers
-    NPU_TAG_FIELDS            comma-separated attribute names → tags
-    NPU_URL_FIELDS            comma-separated attribute names → object URLs
-    NPU_TEMPORAL_FIELDS       comma-separated attribute names → temporal properties
+    uv run python -m sample_db_backend.sync.npu_geoportal page-size META.json
+    uv run python -m sample_db_backend.sync.npu_geoportal extract-ids LIST.json
+    uv run python -m sample_db_backend.sync.npu_geoportal ensure-layer ...
+    uv run python -m sample_db_backend.sync.npu_geoportal upsert-file DETAIL.json ...
+
+Entrypoint ``sample-db-npu-sync`` execs the bash script.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
+import os
 import re
-import subprocess
-import tempfile
-import time
-from collections.abc import Iterator
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import psycopg
 from psycopg.rows import dict_row
@@ -71,10 +62,7 @@ _SKIP_PROP_KEYS = frozenset(
 
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 _EPOCH_MS_MIN = 1_000_000_000_000  # ~2001 in ms
-# Per URL/address: 1 initial attempt + 3 retries = 4 attempts, then abort.
-_MAX_RETRIES = 3
-_BACKOFF_BASE_S = 0.5
-_WGET_BIN = "wget"
+_CLIENT_PAGE_CAP = 1000
 
 
 @dataclass(frozen=True)
@@ -87,31 +75,11 @@ class LayerMeta:
 
 
 @dataclass(frozen=True)
-class SyncStats:
-    """Counters from one sync run."""
+class UpsertStats:
+    """Counters from one detail-file upsert."""
 
-    pages: int
     features: int
     upserted: int
-    layer_id: str
-
-
-class WgetError(RuntimeError):
-    """Raised when wget exits non-zero or returns unusable content."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        exit_code: int | None = None,
-        url: str | None = None,
-        stderr: str | None = None,
-    ) -> None:
-        """Store wget failure context for logging and retries."""
-        super().__init__(message)
-        self.exit_code = exit_code
-        self.url = url
-        self.stderr = stderr
 
 
 def _normalize_layer_root(url: str) -> str:
@@ -122,119 +90,17 @@ def _normalize_layer_root(url: str) -> str:
     return cleaned
 
 
-def _url_with_params(url: str, params: dict[str, str] | None = None) -> str:
-    """Merge query params into ``url`` (params override existing keys)."""
-    if not params:
-        return url
-    parts = urlparse(url)
-    query = dict(parse_qsl(parts.query, keep_blank_values=True))
-    query.update(params)
-    return urlunparse(parts._replace(query=urlencode(query)))
+def load_json_file(path: Path) -> dict[str, Any]:
+    """Load a JSON object from disk (wget output)."""
+    text = path.read_text(encoding="utf-8")
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected JSON object in {path}, got {type(payload).__name__}")
+    return payload
 
 
-def _build_wget_argv(url: str, output_path: Path, *, timeout_s: float) -> list[str]:
-    """Build wget argv matching Marek's ``wget -O file.json "url"`` pattern.
-
-    Adds User-Agent / Accept headers and ``--tries=1`` so our Python loop owns
-    the 1+3 retry policy.
-    """
-    return [
-        _WGET_BIN,
-        "-O",
-        str(output_path),
-        f"--user-agent={SYNC_USER_AGENT}",
-        f"--header=Accept: {SYNC_ACCEPT}",
-        f"--timeout={max(1, int(timeout_s))}",
-        "--tries=1",
-        "--no-verbose",
-        url,
-    ]
-
-
-def _wget_once(url: str, *, timeout_s: float = 60.0, stem: str = "pamatky") -> bytes:
-    """Run ``wget -O <stem>.json "<url>"`` into a temp dir; return body bytes.
-
-    Raises ``WgetError`` on non-zero exit or empty file. Caller parses JSON.
-    """
-    tmp_dir = Path(tempfile.mkdtemp(prefix="npu-wget-"))
-    tmp_path = tmp_dir / f"{stem}.json"
-    try:
-        argv = _build_wget_argv(url, tmp_path, timeout_s=timeout_s)
-        logger.debug("npu_wget_cmd %s", " ".join(argv))
-        completed = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        stderr = (completed.stderr or "").strip()
-        if completed.returncode != 0:
-            raise WgetError(
-                f"wget exit {completed.returncode} for {url}",
-                exit_code=completed.returncode,
-                url=url,
-                stderr=stderr or None,
-            )
-        if not tmp_path.exists() or tmp_path.stat().st_size == 0:
-            raise WgetError(
-                f"wget wrote empty body for {url}",
-                exit_code=completed.returncode,
-                url=url,
-                stderr=stderr or None,
-            )
-        return tmp_path.read_bytes()
-    finally:
-        try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-            tmp_dir.rmdir()
-        except OSError:
-            logger.debug("npu_wget_temp_cleanup_failed path=%s", tmp_path)
-
-
-def fetch_json_with_retries(
-    url: str,
-    *,
-    params: dict[str, str] | None = None,
-    timeout_s: float = 60.0,
-) -> dict[str, Any]:
-    """GET JSON via wget with 1 try + 3 retries (4 attempts) then abort.
-
-    Retries on non-zero wget exit, empty body, or invalid JSON. Exponential
-    backoff between attempts.
-    """
-    full_url = _url_with_params(url, params)
-    last_exc: Exception | None = None
-    for attempt in range(_MAX_RETRIES + 1):
-        try:
-            body = _wget_once(full_url, timeout_s=timeout_s)
-            payload = json.loads(body.decode("utf-8"))
-            if not isinstance(payload, dict):
-                raise WgetError(
-                    f"Expected JSON object from {full_url}, got {type(payload).__name__}",
-                    url=full_url,
-                )
-            return payload
-        except (WgetError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-            last_exc = exc
-            if attempt >= _MAX_RETRIES:
-                break
-            wait = _BACKOFF_BASE_S * (2**attempt)
-            logger.warning(
-                "npu_wget_retry attempt=%s wait_s=%.1f error=%s url=%s",
-                attempt + 1,
-                wait,
-                type(exc).__name__,
-                full_url,
-            )
-            time.sleep(wait)
-    assert last_exc is not None
-    raise last_exc
-
-
-def fetch_layer_metadata(layer_root: str, *, timeout_s: float = 60.0) -> LayerMeta:
-    """GET layer root metadata via wget ``?f=json`` (object attributes + paging caps)."""
-    data = fetch_json_with_retries(layer_root, params={"f": "json"}, timeout_s=timeout_s)
+def parse_layer_metadata(data: dict[str, Any]) -> LayerMeta:
+    """Parse MapServer layer ``?f=json`` metadata into paging caps."""
     if "error" in data:
         raise RuntimeError(f"Layer metadata error: {data['error']}")
 
@@ -245,54 +111,55 @@ def fetch_layer_metadata(layer_root: str, *, timeout_s: float = 60.0) -> LayerMe
     name = str(data.get("name") or "NPÚ layer")
     if not supports:
         logger.warning(
-            "Layer %s does not advertise supportsPagination; proceeding cautiously "
-            "with resultOffset paging (verify server behavior).",
-            layer_root,
+            "Layer does not advertise supportsPagination; proceed cautiously with "
+            "resultOffset ID-list paging (verify server behavior)."
         )
     return LayerMeta(name=name, max_record_count=max_count, supports_pagination=supports)
 
 
-def _page_size(meta: LayerMeta) -> int:
+def page_size(meta: LayerMeta) -> int:
     """Client page size at or below server maxRecordCount (cap 1000)."""
-    return max(1, min(meta.max_record_count, 1000))
+    return max(1, min(meta.max_record_count, _CLIENT_PAGE_CAP))
 
 
-def iter_geojson_pages(
-    layer_root: str,
-    *,
-    page_size: int,
-    timeout_s: float = 60.0,
-) -> Iterator[list[dict[str, Any]]]:
-    """Yield GeoJSON Feature lists using resultOffset / resultRecordCount via wget."""
-    query_url = urljoin(layer_root + "/", "query")
-    offset = 0
-    while True:
-        params = {
-            "where": "1=1",
-            "outFields": "*",
-            "outSR": "4326",
-            "f": "geojson",
-            "resultOffset": str(offset),
-            "resultRecordCount": str(page_size),
-        }
-        payload = fetch_json_with_retries(query_url, params=params, timeout_s=timeout_s)
-        if "error" in payload:
-            raise RuntimeError(f"Query error at offset {offset}: {payload['error']}")
+def extract_object_ids(data: dict[str, Any]) -> list[int]:
+    """Extract OBJECTID list from a ``returnIdsOnly=true`` query JSON.
 
-        features: list[dict[str, Any]]
-        if payload.get("type") == "FeatureCollection":
-            features = list(payload.get("features") or [])
-        elif "features" in payload:
-            features = list(payload.get("features") or [])
-        else:
-            raise RuntimeError(f"Unexpected query payload type at offset {offset}")
+    Accepts ArcGIS shapes::
 
-        if not features:
-            break
-        yield features
-        if len(features) < page_size:
-            break
-        offset += len(features)
+        {"objectIds": [1, 2, 3], "objectIdFieldName": "OBJECTID"}
+        {"objectIdFieldName": "OBJECTID", "objectIds": null}  → []
+    """
+    if "error" in data:
+        raise RuntimeError(f"ID list query error: {data['error']}")
+
+    raw = data.get("objectIds")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"Expected objectIds list, got {type(raw).__name__}")
+
+    ids: list[int] = []
+    for item in raw:
+        try:
+            ids.append(int(item))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Non-integer object id: {item!r}") from exc
+    return ids
+
+
+def features_from_detail(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize a detail response into a list of GeoJSON Feature dicts."""
+    if "error" in data:
+        raise RuntimeError(f"Detail query error: {data['error']}")
+
+    if data.get("type") == "FeatureCollection":
+        return list(data.get("features") or [])
+    if "features" in data:
+        return list(data.get("features") or [])
+    if data.get("type") == "Feature":
+        return [data]
+    raise RuntimeError("Unexpected detail payload (expected GeoJSON FeatureCollection)")
 
 
 def extract_npu_objectid(properties: dict[str, Any]) -> int | None:
@@ -504,83 +371,44 @@ def upsert_feature(
     return True
 
 
-def sync_layer(
+def upsert_detail_file(
     *,
     database_url: str,
-    layer_url: str,
-    layer_name: str | None = None,
+    layer_id: Any,
+    detail_path: Path,
     tag_fields: set[str] | None = None,
     url_fields: set[str] | None = None,
     temporal_fields: set[str] | None = None,
-    timeout_s: float = 60.0,
-) -> SyncStats:
-    """Fetch NPÚ layer pages via wget and upsert into Postgres (one txn per page)."""
-    layer_root = _normalize_layer_root(layer_url)
-    source_key = f"npu:{layer_root}"
+) -> UpsertStats:
+    """Parse one wget detail JSON and upsert all features in a single transaction."""
     tags = tag_fields or set()
     urls = url_fields or set()
     temporals = temporal_fields or set()
-
-    meta = fetch_layer_metadata(layer_root, timeout_s=timeout_s)
-    page_size = _page_size(meta)
-    display_name = layer_name or meta.name
-    logger.info(
-        "npu_sync_start layer=%s maxRecordCount=%s page_size=%s supportsPagination=%s",
-        layer_root,
-        meta.max_record_count,
-        page_size,
-        meta.supports_pagination,
-    )
-
-    pages = 0
-    features_total = 0
+    data = load_json_file(detail_path)
+    features = features_from_detail(data)
     upserted = 0
     with psycopg.connect(database_url, row_factory=dict_row) as conn:
-        layer_id = ensure_layer(
-            conn,
-            source_key=source_key,
-            source_url=layer_root,
-            name=display_name,
-            description=f"Mirrored from NPÚ Geoportal: {layer_root}",
-        )
-        conn.commit()
-
-        for page in iter_geojson_pages(layer_root, page_size=page_size, timeout_s=timeout_s):
-            pages += 1
-            features_total += len(page)
-            try:
-                for feature in page:
-                    if upsert_feature(
-                        conn,
-                        layer_id=layer_id,
-                        feature=feature,
-                        tag_fields=tags,
-                        url_fields=urls,
-                        temporal_fields=temporals,
-                    ):
-                        upserted += 1
-                conn.commit()
-                logger.info(
-                    "npu_sync_page pages=%s features=%s upserted_total=%s",
-                    pages,
-                    len(page),
-                    upserted,
-                )
-            except Exception:
-                conn.rollback()
-                logger.exception(
-                    "npu_sync_page_failed pages=%s features=%s",
-                    pages,
-                    len(page),
-                )
-                raise
-
-    return SyncStats(
-        pages=pages,
-        features=features_total,
-        upserted=upserted,
-        layer_id=str(layer_id),
-    )
+        try:
+            for feature in features:
+                if upsert_feature(
+                    conn,
+                    layer_id=layer_id,
+                    feature=feature,
+                    tag_fields=tags,
+                    url_fields=urls,
+                    temporal_fields=temporals,
+                ):
+                    upserted += 1
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.exception(
+                "npu_upsert_failed path=%s features=%s",
+                detail_path,
+                len(features),
+            )
+            raise
+    return UpsertStats(features=len(features), upserted=upserted)
 
 
 def _parse_csv_set(raw: str | None) -> set[str]:
@@ -589,34 +417,133 @@ def _parse_csv_set(raw: str | None) -> set[str]:
     return {part.strip() for part in raw.split(",") if part.strip()}
 
 
-def main() -> None:
-    """CLI entry: sync one configured NPÚ layer into DATABASE_URL."""
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    settings = get_settings()
-    if not settings.database_url:
-        raise SystemExit("DATABASE_URL is required for NPÚ sync")
-    if not settings.npu_layer_url:
-        raise SystemExit(
-            "NPU_LAYER_URL is required (MapServer layer root). "
-            "See docs/npu-geoportal-sync.md — locked CP_UAP_PVO default in .env.example."
-        )
+def _find_bash_orchestrator() -> Path:
+    """Locate ``scripts/sample-db-npu-sync`` from repo root or CWD."""
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[3] / "scripts" / "sample-db-npu-sync",  # …/src/pkg/sync → repo
+        Path.cwd() / "scripts" / "sample-db-npu-sync",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    raise SystemExit(
+        "Bash orchestrator not found (scripts/sample-db-npu-sync). "
+        "Run from the repo root or install with scripts present."
+    )
 
-    stats = sync_layer(
-        database_url=settings.database_url,
-        layer_url=settings.npu_layer_url,
-        layer_name=settings.npu_layer_name,
-        tag_fields=_parse_csv_set(settings.npu_tag_fields),
-        url_fields=_parse_csv_set(settings.npu_url_fields),
-        temporal_fields=_parse_csv_set(settings.npu_temporal_fields),
+
+def main() -> None:
+    """Thin wrapper: exec bash orchestrator (wget list → detail → Python insert)."""
+    script = _find_bash_orchestrator()
+    os.execve(str(script), [str(script), *sys.argv[1:]], os.environ)
+
+
+def _cmd_page_size(args: argparse.Namespace) -> int:
+    meta = parse_layer_metadata(load_json_file(Path(args.path)))
+    print(page_size(meta))
+    return 0
+
+
+def _cmd_layer_name(args: argparse.Namespace) -> int:
+    meta = parse_layer_metadata(load_json_file(Path(args.path)))
+    override = (args.override or "").strip()
+    print(override or meta.name)
+    return 0
+
+
+def _cmd_extract_ids(args: argparse.Namespace) -> int:
+    ids = extract_object_ids(load_json_file(Path(args.path)))
+    for oid in ids:
+        print(oid)
+    return 0
+
+
+def _cmd_ensure_layer(args: argparse.Namespace) -> int:
+    database_url = args.database_url or get_settings().database_url
+    if not database_url:
+        raise SystemExit("DATABASE_URL is required")
+    layer_root = _normalize_layer_root(args.layer_url)
+    source_key = f"npu:{layer_root}"
+    name = args.name or "NPÚ layer"
+    with psycopg.connect(database_url, row_factory=dict_row) as conn:
+        layer_id = ensure_layer(
+            conn,
+            source_key=source_key,
+            source_url=layer_root,
+            name=name,
+            description=f"Mirrored from NPÚ Geoportal: {layer_root}",
+        )
+        conn.commit()
+    print(layer_id)
+    return 0
+
+
+def _cmd_upsert_file(args: argparse.Namespace) -> int:
+    database_url = args.database_url or get_settings().database_url
+    if not database_url:
+        raise SystemExit("DATABASE_URL is required")
+    settings = get_settings()
+    stats = upsert_detail_file(
+        database_url=database_url,
+        layer_id=args.layer_id,
+        detail_path=Path(args.path),
+        tag_fields=_parse_csv_set(args.tag_fields or settings.npu_tag_fields),
+        url_fields=_parse_csv_set(args.url_fields or settings.npu_url_fields),
+        temporal_fields=_parse_csv_set(args.temporal_fields or settings.npu_temporal_fields),
     )
     logger.info(
-        "npu_sync_done pages=%s features=%s upserted=%s layer_id=%s",
-        stats.pages,
+        "npu_upsert_ok features=%s upserted=%s path=%s",
         stats.features,
         stats.upserted,
-        stats.layer_id,
+        args.path,
     )
+    print(f"{stats.upserted}/{stats.features}")
+    return 0
+
+
+def cli(argv: list[str] | None = None) -> int:
+    """Argparse entry for bash helpers (parse JSON + DB inserts)."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    parser = argparse.ArgumentParser(
+        prog="npu_geoportal",
+        description="NPÚ sync Python helpers: parse wget JSON + Postgres upserts.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_page = sub.add_parser("page-size", help="Print client page size from meta JSON")
+    p_page.add_argument("path", help="Path to wget meta JSON (?f=json)")
+    p_page.set_defaults(func=_cmd_page_size)
+
+    p_name = sub.add_parser("layer-name", help="Print layer display name from meta JSON")
+    p_name.add_argument("path", help="Path to wget meta JSON")
+    p_name.add_argument("--override", default="", help="Optional NPU_LAYER_NAME override")
+    p_name.set_defaults(func=_cmd_layer_name)
+
+    p_ids = sub.add_parser("extract-ids", help="Print OBJECTIDs from returnIdsOnly JSON")
+    p_ids.add_argument("path", help="Path to pamatky.json (ID list)")
+    p_ids.set_defaults(func=_cmd_extract_ids)
+
+    p_ensure = sub.add_parser("ensure-layer", help="Upsert map_layers row; print UUID")
+    p_ensure.add_argument("--layer-url", required=True)
+    p_ensure.add_argument("--name", default="")
+    p_ensure.add_argument("--database-url", default="")
+    p_ensure.set_defaults(func=_cmd_ensure_layer)
+
+    p_up = sub.add_parser("upsert-file", help="Upsert GeoJSON detail file into Postgres")
+    p_up.add_argument("path", help="Path to wget detail GeoJSON")
+    p_up.add_argument("--layer-id", required=True)
+    p_up.add_argument("--database-url", default="")
+    p_up.add_argument("--tag-fields", default="")
+    p_up.add_argument("--url-fields", default="")
+    p_up.add_argument("--temporal-fields", default="")
+    p_up.set_defaults(func=_cmd_upsert_file)
+
+    args = parser.parse_args(argv)
+    return int(args.func(args))
 
 
 if __name__ == "__main__":
-    main()
+    # ``python -m sample_db_backend.sync.npu_geoportal …`` → helpers
+    # ``sample-db-npu-sync`` console script → main() → bash
+    raise SystemExit(cli())

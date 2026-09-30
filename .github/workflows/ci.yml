@@ -35,3 +35,5 @@ jobs:
         env:
           # Stub mode: no remote Supabase hit (saves Free egress / minutes)
           DATABASE_URL: ""
+      - name: Bash sync smoke (mocked wget)
+        run: bash tests/test_npu_sync_bash.sh
