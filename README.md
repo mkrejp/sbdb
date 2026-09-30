@@ -79,6 +79,7 @@ Wake Supabase Free if paused before migrate/deploy. Secrets stay in Railway/env 
 - [Agents instructions](docs/agents-instructions.md) — standing brief for agents working on this repo
 - [Stage 5 — tooling & optimizations](docs/stage-five-tooling-and-optimizations.md) — pipeline/app tooling; Cursor-plan recommendations
 - [Stage 6 — final build-agent plans](docs/stage-six-final-build-plans.md) — WP-A–E; implement after user approval (not deploy yet)
+- [Stage 7 — build application & deploy](docs/stage-seven-build-and-deploy.md) — Docker/image build from GitHub mirror, deploy, DB updates, smoke
 - [Stage 1–4 build plans](docs/stage-one-architecture-plan.md) — architecture → function/cost → DevOps/QA → [design overview](docs/stage-four-design-overview.md)
 
 ## Design docs

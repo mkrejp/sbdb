@@ -164,15 +164,17 @@ Execute **WP-A → WP-E** in order unless noted parallel. Prefer draft PRs via O
 
 Build agents stop when `main` is **deployable**. Deployment agents then:
 
-### Stage 7 (deploy agents)
+### Stage 7 (build + deploy agents)
 
-1. Wake Supabase Free if paused.  
-2. Confirm migrations applied on **samplebackdb** (`001` then `002` if needed).  
-3. Railway: Trial/Free service from GitHub; **verify GitHub** (avoid Limited Trial); **no** Railway Postgres; set pooler `DATABASE_URL` + app env; enable **Wait for CI** autodeploy on `main`.  
-4. Deploy; manual smoke: `curl /health` then one read path.  
-5. Optional: apply CNAME `sbdb` → Railway target per [dns-sbdb-animarium-ai.md](./dns-sbdb-animarium-ai.md); TLS via Railway.  
-6. Optional initial fill: NPÚ sync from **WSL** (not from blocked cloud).  
-7. Ask user immediately if Railway/DNS/Supabase password missing.
+1. Ensure tested Origin `main` is **mirrored** to GitHub [mkrejp/sbdb](https://github.com/mkrejp/sbdb) (`release` / `main`).  
+2. **Build the application** — Railway (or CI) builds the Docker image/artifact from `mkrejp/sbdb` using repo `Dockerfile` + start command; fix build failures before treating deploy as done.  
+3. Wake Supabase Free if paused.  
+4. Confirm migrations applied on **samplebackdb** (`001` then `002` if needed).  
+5. Railway **zesty-adaptation** / **sbdb-api**: Trial/Free; **no** Railway Postgres; shared/pooler `DATABASE_URL` + app env; Wait for CI / deploy from GitHub `main`.  
+6. Deploy the built image; manual smoke: `curl /health` then one read path.  
+7. Optional: apply CNAME `sbdb` → Railway target per [dns-sbdb-animarium-ai.md](./dns-sbdb-animarium-ai.md); TLS via Railway.  
+8. Optional initial fill: NPÚ sync from **WSL** (not from blocked cloud).  
+9. Ask user immediately if Railway/DNS/Supabase/GitHub write credentials missing.
 
 ### Stage 8 (eval agents)
 

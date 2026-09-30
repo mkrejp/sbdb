@@ -36,7 +36,7 @@ Build a **sample DB backend** in stages: plan first, then framework and design d
 | **4** | Initial repo framework + design-plan docs (Markdown + SQL/JSON) |
 | **5** | Evaluate tooling (plugins/addons/extensions) for pipeline and app; suggest delivery-pipeline and performance optimizations |
 | **6** | Rethink stages 1–5; create **final plans for build agents** to implement the app |
-| **7** | Deploy; DB data updates; deployment agents put release online and start testing |
+| **7** | **Build** application (Docker/image from GitHub release mirror); deploy; DB data updates; deployment agents put release online and start testing |
 | **8** | Test/evaluate deployed app; monitoring setup changes; version numbering, changelog, PR version promotion |
 | **9** | Watch billing; cost-of-running estimates; financial optimization (tokens + hosting) |
 
@@ -123,7 +123,8 @@ Use as intent history; current locks above override if anything conflicts.
 20. NPÚ uses **MapServer**; portal npu.cz; concrete layer **CP_UAP_PVO/MapServer/0** on `geoportal.npu.cz`.  
 21. WSL project path: `/home/cursor/dev/genesis`; Origin repo private.  
 22. Document prompts/decisions as **agents-instructions** in the repo for other agents.  
-23. GitHub deploy mirror: **mkrejp/sbdb** with environment **release**; Railway **zesty-adaptation** deploys from that mirror (shared DB env vars).
+23. GitHub deploy mirror: **mkrejp/sbdb** with environment **release**; Railway **zesty-adaptation** deploys from that mirror (shared DB env vars).  
+24. Stage 7 includes explicit **build application** (Docker from `mkrejp/sbdb`) before deploy/smoke.
 
 ---
 
@@ -136,6 +137,7 @@ Use as intent history; current locks above override if anything conflicts.
 | Stage 4 design (`notes-for-data-model.*`, API design) | Schema + API |
 | Stage 5 (`stage-five-tooling-and-optimizations.md`) | Pipeline/app tooling + perf; Cursor-plan tooling |
 | Stage 6 (`stage-six-final-build-plans.md`) | Final build-agent work packages (implement **after user approves**) |
+| Stage 7 (`stage-seven-build-and-deploy.md`) | **Build** app image + deploy + DB updates + smoke |
 | `npu-geoportal-sync.md` | NPÚ pagination / upsert practices |
 | DNS notes for `sbdb.animarium.ai` | CNAME → Railway |
 
