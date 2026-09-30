@@ -154,5 +154,5 @@ Use as intent history; current locks above override if anything conflicts.
 - Live NPÚ `/query` may need user’s network (WAF on some cloud IPs) — prefer WSL `/home/cursor/dev/genesis`.  
 - **Stage 5 done:** tooling + optimizations → [stage-five-tooling-and-optimizations.md](./stage-five-tooling-and-optimizations.md).  
 - **Stage 6 done (plans only):** [stage-six-final-build-plans.md](./stage-six-final-build-plans.md) — confirmed locks, `main` vs gaps, WP-A–E for build agents, NPÚ/WAF/WSL notes, stage 7–8 deploy handoff, do-not-reopen list.  
-- **Stage 6 approved:** build agents implementing WP-A–E (NPU defaults, API/sync harden, pre-commit/CI format, Dockerfile + Railway prep docs). No stage-7 deploy / live NPÚ fill from agents until authorized.  
-- After WP-A–E merge → stage 7 (deploy / DB updates / smoke) and stage 8 (eval / monitoring / version hygiene).
+- **Stage 6 approved → WP-A–E in draft PR #4** (`cursor/wp-a-e-harden-8c7c`): NPU defaults, API/sync harden, pre-commit/CI format, Dockerfile + Railway prep docs. No stage-7 deploy / live NPÚ fill from agents until authorized.  
+- After merge → stage 7 (deploy / DB updates / smoke) and stage 8 (eval / monitoring / version hygiene).
