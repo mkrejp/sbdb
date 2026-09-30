@@ -8,7 +8,7 @@ FIXTURES="${ROOT}/tests/fixtures/npu"
 MOCK_BIN="$(mktemp -d)"
 trap 'rm -rf "${MOCK_BIN}"' EXIT
 
-# Fake wget: copy fixtures based on URL shape; honor -O
+# Fake wget: copy fixtures based on URL shape; honor -O / --timeout / --tries only
 cat > "${MOCK_BIN}/wget" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -17,14 +17,18 @@ url=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -O) out="$2"; shift 2 ;;
-    --user-agent=*|--header=*|--timeout=*|--tries=*|--no-verbose) shift ;;
-    --user-agent|--header|--timeout|--tries) shift 2 ;;
+    --timeout=*|--tries=*) shift ;;
+    --timeout|--tries) shift 2 ;;
     http*|HTTP*) url="$1"; shift ;;
-    *) shift ;;
+    *)
+      echo "unexpected wget option: $1" >&2
+      exit 2
+      ;;
   esac
 done
 : "${out:?wget mock missing -O}"
 : "${url:?wget mock missing url}"
+# URL must be last positional recorded; options already consumed
 # Record calls for assertions
 echo "${url}" >> "${MOCK_BIN}/wget-calls.txt"
 FIXTURES_DIR="${FIXTURES_DIR:?}"

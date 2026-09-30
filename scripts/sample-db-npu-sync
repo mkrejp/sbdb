@@ -33,8 +33,6 @@ NPU_LAYER_URL="${NPU_LAYER_URL:-${DEFAULT_LAYER_URL}}"
 NPU_DETAIL_BATCH="${NPU_DETAIL_BATCH:-10}"
 NPU_WGET_TIMEOUT="${NPU_WGET_TIMEOUT:-60}"
 NPU_MAX_RETRIES="${NPU_MAX_RETRIES:-3}"
-SYNC_UA='YourSyncBot/1.0'
-SYNC_ACCEPT='application/json'
 BACKOFF_BASE=1
 
 # Prefer uv-run Python when available (repo venv); else bare python3 + PYTHONPATH.
@@ -81,13 +79,11 @@ wget_retry() {
   local max="${NPU_MAX_RETRIES}"
   local wait rc
   while true; do
+    # Only -O / --timeout / --tries; URL is always the last argument.
     set +e
     wget -O "${out}" \
-      --user-agent="${SYNC_UA}" \
-      --header="Accept: ${SYNC_ACCEPT}" \
       --timeout="${NPU_WGET_TIMEOUT}" \
       --tries=1 \
-      --no-verbose \
       "${url}"
     rc=$?
     set -e

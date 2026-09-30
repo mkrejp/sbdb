@@ -82,7 +82,7 @@ Design artifact label: **notes-for-data-model**. Domain is **GeoJSON map layers*
 - Page ID lists with `resultOffset` / `resultRecordCount`; respect `maxRecordCount` (often 2000). Never assume a single `where=1=1` returns all rows.  
 - Upsert on `OBJECTID` / `id` → `npu_objectid`.  
 - CLI: `./scripts/sample-db-npu-sync` or `uv run sample-db-npu-sync` (thin wrapper → bash).  
-- Request headers: `User-Agent: YourSyncBot/1.0`, `Accept: application/json`.  
+- wget CLI shape: `wget -O <file> --timeout=N --tries=1 <url>` (URL last; no other wget flags).  
 - **Cloud agent IPs may be WAF-blocked** on `/query`; prefer running sync from the user’s WSL/network.
 
 Practices detail: `docs/npu-geoportal-sync.md` (and Project Context mirror).
