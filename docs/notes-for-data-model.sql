@@ -1,5 +1,5 @@
 -- Migration 001: notes-for-data-model — layers / objects / typed props / tags / urls
--- Geometry: JSONB GeoJSON (Supabase Free; PostGIS optional later).
+-- Geometry: PostGIS geom (EPSG:4326) + JSONB dual-write (see migrations/003_postgis_layer_objects.sql).
 -- Images/binary props: Supabase Storage refs (bucket/path/url + metadata), never BYTEA.
 -- Explicit URL lists: layer_object_urls (1:N), distinct from typed image/binary properties.
 -- Apply: psql "$DATABASE_URL" -f migrations/001_create_notes_for_data_model.sql
@@ -39,11 +39,13 @@ CREATE UNIQUE INDEX uq_map_layers_source_key
     WHERE source_key IS NOT NULL;
 
 -- Layer objects (= GeoJSON features); npu_objectid = NPÚ sync upsert key
+-- geometry JSONB kept for API; geom filled by migration 003 + app dual-write
 CREATE TABLE layer_objects (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     layer_id UUID NOT NULL REFERENCES map_layers (id) ON DELETE CASCADE,
     npu_objectid BIGINT,
     geometry JSONB NOT NULL,
+    -- geom geometry(Geometry, 4326) added in migrations/003_postgis_layer_objects.sql
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT layer_objects_geometry_object CHECK (jsonb_typeof(geometry) = 'object'),

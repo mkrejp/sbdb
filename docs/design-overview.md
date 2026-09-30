@@ -32,7 +32,7 @@ No auth, queues, or frontend in this slice.
 
 | Concern | Choice | Why |
 | --- | --- | --- |
-| Geometry | **JSONB** GeoJSON | Free-tier friendly; GIN index; PostGIS/`ST_GeomFromGeoJSON` optional later |
+| Geometry | **PostGIS** `geom` (EPSG:4326) + JSONB dual-write | GIST on `geom`; REST returns GeoJSON via `ST_AsGeoJSON` |
 | Image/binary **properties** | **Supabase Storage refs** | Avoid BYTEA; distinct from URL lists |
 | Explicit URL lists | **`layer_object_urls`** | Ordered 1:N per object |
 | NPÚ identity | **`layer_objects.npu_objectid`** | Upsert key (`OBJECTID`/`id`); unique per layer |

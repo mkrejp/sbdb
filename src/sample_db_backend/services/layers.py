@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -198,6 +199,19 @@ def delete_layer(layer_id: UUID) -> None:
 # --- objects -----------------------------------------------------------------
 
 
+# GeoJSON for REST: prefer PostGIS geom (source of truth), fall back to JSONB.
+_OBJECT_SELECT = (
+    "id, layer_id, "
+    "COALESCE(ST_AsGeoJSON(geom)::jsonb, geometry) AS geometry, "
+    "created_at, updated_at"
+)
+
+
+def _geojson_text(geometry: dict[str, Any]) -> str:
+    """Serialize GeoJSON for ST_GeomFromGeoJSON."""
+    return json.dumps(geometry, separators=(",", ":"), ensure_ascii=False)
+
+
 def list_objects(
     layer_id: UUID | None = None,
     *,
@@ -231,7 +245,12 @@ def list_objects(
     with get_connection() as conn:
         rows = conn.execute(
             f"""
-            SELECT DISTINCT o.id, o.layer_id, o.geometry, o.created_at, o.updated_at
+            SELECT DISTINCT
+                o.id,
+                o.layer_id,
+                COALESCE(ST_AsGeoJSON(o.geom)::jsonb, o.geometry) AS geometry,
+                o.created_at,
+                o.updated_at
             FROM layer_objects o
             {join}
             {where}
@@ -252,8 +271,8 @@ def get_object(object_id: UUID) -> LayerObject:
         raise NotFoundError(str(object_id))
     with get_connection() as conn:
         row = conn.execute(
-            """
-            SELECT id, layer_id, geometry, created_at, updated_at
+            f"""
+            SELECT {_OBJECT_SELECT}
             FROM layer_objects WHERE id = %s
             """,
             (object_id,),
@@ -264,7 +283,7 @@ def get_object(object_id: UUID) -> LayerObject:
 
 
 def create_object(layer_id: UUID, payload: ObjectCreate) -> LayerObject:
-    """Create an object under a layer."""
+    """Create an object under a layer (dual-write JSONB + PostGIS)."""
     get_layer(layer_id)
     if not database_configured():
         now = _now()
@@ -279,11 +298,16 @@ def create_object(layer_id: UUID, payload: ObjectCreate) -> LayerObject:
         return _object(row)
     with get_connection() as conn:
         row = conn.execute(
-            """
-            INSERT INTO layer_objects (layer_id, geometry) VALUES (%s, %s)
-            RETURNING id, layer_id, geometry, created_at, updated_at
+            f"""
+            INSERT INTO layer_objects (layer_id, geometry, geom)
+            VALUES (
+                %s,
+                %s,
+                ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)
+            )
+            RETURNING {_OBJECT_SELECT}
             """,
-            (layer_id, as_jsonb(payload.geometry)),
+            (layer_id, as_jsonb(payload.geometry), _geojson_text(payload.geometry)),
         ).fetchone()
         conn.commit()
     assert row is not None
@@ -291,7 +315,7 @@ def create_object(layer_id: UUID, payload: ObjectCreate) -> LayerObject:
 
 
 def update_object(object_id: UUID, payload: ObjectUpdate) -> LayerObject:
-    """Update object geometry."""
+    """Update object geometry (dual-write JSONB + PostGIS)."""
     data = payload.model_dump(exclude_unset=True)
     if not data:
         return get_object(object_id)
@@ -302,13 +326,17 @@ def update_object(object_id: UUID, payload: ObjectUpdate) -> LayerObject:
                 row["updated_at"] = _now()
                 return _object(row)
         raise NotFoundError(str(object_id))
+    geometry = data["geometry"]
     with get_connection() as conn:
         row = conn.execute(
-            """
-            UPDATE layer_objects SET geometry = %s WHERE id = %s
-            RETURNING id, layer_id, geometry, created_at, updated_at
+            f"""
+            UPDATE layer_objects
+            SET geometry = %s,
+                geom = ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)
+            WHERE id = %s
+            RETURNING {_OBJECT_SELECT}
             """,
-            (as_jsonb(data["geometry"]), object_id),
+            (as_jsonb(geometry), _geojson_text(geometry), object_id),
         ).fetchone()
         conn.commit()
     if row is None:

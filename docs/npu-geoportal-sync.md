@@ -101,7 +101,7 @@ Diff mode re-fetches details for every ID and runs `upsert-file --only-if-change
 | --- | --- | --- |
 | Primary keys | Identity binding | NPÚ `OBJECTID` → `layer_objects.npu_objectid` |
 | SQL storage | Upsert | `INSERT … ON CONFLICT (layer_id, npu_objectid) DO UPDATE …` |
-| Geometry | JSONB GeoJSON | This project; PostGIS optional later |
+| Geometry | PostGIS `geom` + JSONB dual-write | `ST_GeomFromGeoJSON` / `ST_AsGeoJSON`; GIST on `geom` |
 | Automation | Schedule | Weekly/monthly later (stage 7) |
 
 ## Project mapping (CP_UAP_PVO)
@@ -109,7 +109,7 @@ Diff mode re-fetches details for every ID and runs `upsert-file --only-if-change
 | NPÚ | App |
 | --- | --- |
 | Layer root + name | `map_layers` |
-| Feature geometry | `layer_objects.geometry` (JSONB) |
+| Feature geometry | `layer_objects.geom` (PostGIS EPSG:4326) + `geometry` JSONB dual-write |
 | `OBJECTID` | `layer_objects.npu_objectid` |
 | `Subtyp`, `typOchranyKod`, `typOchranyNazev`, `fazeOchranyKod`, `fazeOchranyNazev`, `PrStavNazev` | `tags` / `layer_object_tags` |
 | `urlExt`, `urlInt` | `layer_object_urls` |

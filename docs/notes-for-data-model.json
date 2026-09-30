@@ -5,14 +5,14 @@
     "source": "NPÚ Geoportal ArcGIS REST",
     "module": "src/sample_db_backend/sync/npu_geoportal.py",
     "practices_doc": "docs/npu-geoportal-sync.md",
-    "geometry_storage": "JSONB (PostGIS ST_GeomFromGeoJSON optional later)",
+    "geometry_storage": "PostGIS geom (EPSG:4326) + JSONB geometry dual-write; ST_GeomFromGeoJSON / ST_AsGeoJSON",
     "pagination": ["read maxRecordCount", "resultOffset", "resultRecordCount", "outSR=4326", "f=geojson"],
     "upsert_key": "layer_objects.npu_objectid from properties.OBJECTID|id"
   },
   "storage_choices": {
     "geometry": {
-      "choice": "JSONB",
-      "rationale": "GeoJSON Geometry as JSONB fits Supabase Free; GIN index. PostGIS optional later."
+      "choice": "PostGIS + JSONB dual-write",
+      "rationale": "geom geometry(Geometry,4326) + GIST for spatial ops; geometry JSONB kept for REST/API compatibility."
     },
     "images_and_binary_properties": {
       "choice": "Supabase Storage references",
@@ -26,7 +26,7 @@
   "field_mapping": {
     "layer_root_url": "map_layers.source_url + source_key=npu:<url>",
     "layer_metadata_name": "map_layers.name",
-    "feature_geometry": "layer_objects.geometry",
+    "feature_geometry": "layer_objects.geom (+ geometry JSONB dual-write)",
     "OBJECTID_or_id": "layer_objects.npu_objectid",
     "NPU_TAG_FIELDS": "tags + layer_object_tags",
     "NPU_URL_FIELDS_or_http_values": "layer_object_urls",
@@ -40,7 +40,7 @@
     },
     {
       "name": "layer_objects",
-      "columns": ["id", "layer_id", "npu_objectid", "geometry (jsonb)", "created_at", "updated_at"],
+      "columns": ["id", "layer_id", "npu_objectid", "geometry (jsonb)", "geom (geometry 4326)", "created_at", "updated_at"],
       "unique": [["layer_id", "npu_objectid"]]
     },
     {

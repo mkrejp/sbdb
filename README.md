@@ -8,7 +8,7 @@
 | Public host (later) | `sbdb.animarium.ai` → Railway |
 | Dev → deploy | Origin `marek-k-ejpsk/genesis` → GitHub `mkrejp/sbdb` (env **release**) → Railway **zesty-adaptation** / **sbdb-api** |
 | CI / host | GitHub Actions · Railway (no Railway Postgres) |
-| Geometry | JSONB GeoJSON |
+| Geometry | PostGIS `geom` (EPSG:4326) + JSONB `geometry` dual-write |
 | Image/binary props | Supabase Storage refs (not BYTEA) |
 | Object URLs | `layer_object_urls` ordered 1:N list |
 | Ingest | `./scripts/sample-db-npu-sync` (bash+wget; Python insert) ← [NPÚ practices](docs/npu-geoportal-sync.md) |
@@ -26,8 +26,10 @@ curl -s http://127.0.0.1:8010/health
 ```bash
 psql "$DATABASE_URL" -f migrations/001_create_notes_for_data_model.sql
 psql "$DATABASE_URL" -f migrations/002_npu_sync_keys.sql
+psql "$DATABASE_URL" -f migrations/003_postgis_layer_objects.sql
 # Live NPÚ sync: prefer user WSL (/home/cursor/dev/genesis) — cloud IPs may be WAF-blocked
 # bash owns wget (list → per-object detail); Python owns JSON transform + DB upsert
+# Upserts dual-write PostGIS geom + JSONB geometry from NPÚ GeoJSON
 timeout 300 ./scripts/sample-db-npu-sync
 # or: timeout 300 uv run sample-db-npu-sync
 uv run ruff check src tests && uv run ruff format --check src tests && uv run pytest -q
@@ -73,6 +75,7 @@ Or use the Dockerfile `CMD` (same shape). Prefer **Wait for CI** autodeploy on `
 ```bash
 psql "$DATABASE_URL" -f migrations/001_create_notes_for_data_model.sql
 psql "$DATABASE_URL" -f migrations/002_npu_sync_keys.sql
+psql "$DATABASE_URL" -f migrations/003_postgis_layer_objects.sql
 ```
 
 Wake Supabase Free if paused before migrate/deploy. Secrets stay in Railway/env only — never commit.

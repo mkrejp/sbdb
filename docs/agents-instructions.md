@@ -65,7 +65,7 @@ Design artifact label: **notes-for-data-model**. Domain is **GeoJSON map layers*
 | Table | Role |
 | --- | --- |
 | `map_layers` | Layer containers (`source_url`, `source_key`, …) |
-| `layer_objects` | GeoJSON features (`geometry` JSONB; `npu_objectid` for sync) |
+| `layer_objects` | GeoJSON features (`geom` PostGIS EPSG:4326 + `geometry` JSONB dual-write; `npu_objectid` for sync) |
 | `layer_object_properties` | Typed props: **text** / **temporal** / **image** / **binary** (Storage refs for image/binary, not large BYTEA) |
 | `tags` + `layer_object_tags` | Classification (M2M) |
 | `layer_object_urls` | Ordered list of URLs per object (1:N) |
