@@ -6,6 +6,7 @@
 | --- | --- |
 | Supabase | `samplebackdb` (`bsauzwsgiwghkwgehcid`, eu-central-2, Free) |
 | Public host (later) | `sbdb.animarium.ai` → Railway |
+| Dev → deploy | Origin `marek-k-ejpsk/genesis` → GitHub `mkrejp/sbdb` (env **release**) → Railway **zesty-adaptation** / **sbdb-api** |
 | CI / host | GitHub Actions · Railway (no Railway Postgres) |
 | Geometry | JSONB GeoJSON |
 | Image/binary props | Supabase Storage refs (not BYTEA) |
