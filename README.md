@@ -40,9 +40,9 @@ bash tests/test_npu_sync_bash.sh   # offline wget mock smoke
 
 `NPU_LAYER_URL` is locked to the CP_UAP_PVO MapServer layer (see `.env.example` and [NPÚ sync](docs/npu-geoportal-sync.md)).
 
-## Deploy prep (stage 7 — do not deploy from this slice)
+## Deploy prep (stage 7+)
 
-Artifacts only; **no live Railway deploy** from build agents.
+Live host: **https://sbdb.animarium.ai** (Railway **zesty-adaptation** / **sbdb-api** from GitHub `mkrejp/sbdb`). Marek mirrors Origin → GitHub from WSL; agents do not push the mirror.
 
 ### Dockerfile
 
@@ -85,10 +85,12 @@ Wake Supabase Free if paused before migrate/deploy. Secrets stay in Railway/env 
 
 ## Documentation
 
+- [Changelog](CHANGELOG.md) — semver notes (current **0.2.0**)
 - [Agents instructions](docs/agents-instructions.md) — standing brief for agents working on this repo
 - [Stage 5 — tooling & optimizations](docs/stage-five-tooling-and-optimizations.md) — pipeline/app tooling; Cursor-plan recommendations
 - [Stage 6 — final build-agent plans](docs/stage-six-final-build-plans.md) — WP-A–E; implement after user approval (not deploy yet)
 - [Stage 7 — build application & deploy](docs/stage-seven-build-and-deploy.md) — Docker/image build from GitHub mirror, deploy, DB updates, smoke
+- [Stage 8 — eval, monitoring, versioning](docs/stage-eight-eval-versioning.md) — live smoke, free-tier monitoring, version promotion
 - [Stage 1–4 build plans](docs/stage-one-architecture-plan.md) — architecture → function/cost → DevOps/QA → [design overview](docs/stage-four-design-overview.md)
 
 ## Design docs
