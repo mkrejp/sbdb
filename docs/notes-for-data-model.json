@@ -1,0 +1,64 @@
+{
+  "artifact": "notes-for-data-model",
+  "domain": "GeoJSON map layers with typed properties, tags, URL lists; NPÚ Geoportal ingest",
+  "ingest": {
+    "source": "NPÚ Geoportal ArcGIS REST",
+    "module": "src/sample_db_backend/sync/npu_geoportal.py",
+    "practices_doc": "docs/npu-geoportal-sync.md",
+    "geometry_storage": "JSONB (PostGIS ST_GeomFromGeoJSON optional later)",
+    "pagination": ["read maxRecordCount", "resultOffset", "resultRecordCount", "outSR=4326", "f=geojson"],
+    "upsert_key": "layer_objects.npu_objectid from properties.OBJECTID|id"
+  },
+  "storage_choices": {
+    "geometry": {
+      "choice": "JSONB",
+      "rationale": "GeoJSON Geometry as JSONB fits Supabase Free; GIN index. PostGIS optional later."
+    },
+    "images_and_binary_properties": {
+      "choice": "Supabase Storage references",
+      "rationale": "Typed image/binary properties store bucket/path/url + metadata — not BYTEA."
+    },
+    "object_url_lists": {
+      "choice": "layer_object_urls table (1:N)",
+      "rationale": "Explicit ordered URL list per object; filled from NPÚ URL-like attributes."
+    }
+  },
+  "field_mapping": {
+    "layer_root_url": "map_layers.source_url + source_key=npu:<url>",
+    "layer_metadata_name": "map_layers.name",
+    "feature_geometry": "layer_objects.geometry",
+    "OBJECTID_or_id": "layer_objects.npu_objectid",
+    "NPU_TAG_FIELDS": "tags + layer_object_tags",
+    "NPU_URL_FIELDS_or_http_values": "layer_object_urls",
+    "date_like_attributes": "layer_object_properties value_type=temporal",
+    "other_scalars": "layer_object_properties value_type=text"
+  },
+  "tables": [
+    {
+      "name": "map_layers",
+      "columns": ["id", "name", "description", "source_key", "source_url", "created_at", "updated_at"]
+    },
+    {
+      "name": "layer_objects",
+      "columns": ["id", "layer_id", "npu_objectid", "geometry (jsonb)", "created_at", "updated_at"],
+      "unique": [["layer_id", "npu_objectid"]]
+    },
+    {
+      "name": "layer_object_properties",
+      "discriminant": {
+        "column": "value_type",
+        "enum": ["text", "temporal", "image", "binary"]
+      }
+    },
+    { "name": "tags" },
+    { "name": "layer_object_tags", "primary_key": ["object_id", "tag_id"] },
+    {
+      "name": "layer_object_urls",
+      "columns": ["id", "object_id", "url", "label", "sort_order", "created_at", "updated_at"]
+    }
+  ],
+  "security": {
+    "rls": true,
+    "note": "RLS on all tables; FastAPI/sync use DATABASE_URL role (bypasses RLS)."
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "base_path": "/",
+  "validation_error_status": 422,
+  "domain": "GeoJSON map layers (design artifact: notes-for-data-model)",
+  "endpoints": [
+    { "method": "GET", "path": "/health" },
+    { "method": "GET|POST", "path": "/layers" },
+    { "method": "GET|PATCH|DELETE", "path": "/layers/{layer_id}" },
+    { "method": "GET|POST", "path": "/layers/{layer_id}/objects" },
+    { "method": "GET", "path": "/objects", "query": { "tag": "optional tag name filter" } },
+    { "method": "GET|PATCH|DELETE", "path": "/objects/{object_id}" },
+    {
+      "method": "GET|POST",
+      "path": "/objects/{object_id}/properties",
+      "note": "POST discriminated by value_type: text|temporal|image|binary"
+    },
+    { "method": "GET|PATCH|DELETE", "path": "/properties/{property_id}" },
+    { "method": "GET|POST", "path": "/tags" },
+    { "method": "GET|PATCH|DELETE", "path": "/tags/{tag_id}" },
+    { "method": "GET", "path": "/objects/{object_id}/tags" },
+    { "method": "PUT|DELETE", "path": "/objects/{object_id}/tags/{tag_id}" },
+    { "method": "GET|POST", "path": "/objects/{object_id}/urls", "note": "Ordered URL list (sort_order)" },
+    { "method": "GET|PATCH|DELETE", "path": "/urls/{url_id}" }
+  ],
+  "error_statuses": { "validation": 422, "not_found": 404, "conflict": 409 }
+}

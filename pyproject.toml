@@ -1,0 +1,42 @@
+[project]
+name = "sample-db-backend"
+version = "0.1.0"
+description = "Sample FastAPI backend with PostgreSQL via Supabase (notes-for-data-model)."
+readme = "README.md"
+authors = [
+    { name = "Cursor Agent", email = "cursoragent@cursor.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.142.1",
+    "httpx>=0.28.1",
+    "psycopg[binary]>=3.3.6",
+    "pydantic-settings>=2.15.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.scripts]
+sample-db-backend = "sample_db_backend:main"
+sample-db-npu-sync = "sample_db_backend.sync.npu_geoportal:main"
+
+[build-system]
+requires = ["uv_build>=0.12.21,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
