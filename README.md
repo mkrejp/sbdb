@@ -31,6 +31,10 @@ uv run ruff check src tests && uv run pytest -q
 
 `NPU_LAYER_URL` is a **placeholder** in `.env.example` until the exact NPÚ Geoportal FeatureServer/MapServer layer is chosen (portal: [npu.cz](https://npu.cz)).
 
+## Documentation
+
+- [Agents instructions](docs/agents-instructions.md) — standing brief for agents working on this repo
+
 ## Design docs
 
 - [Design overview](docs/design-overview.md)
