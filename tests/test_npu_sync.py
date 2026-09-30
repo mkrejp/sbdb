@@ -5,8 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 
 from sample_db_backend.sync.npu_geoportal import (
+    SYNC_HEADERS,
+    SYNC_USER_AGENT,
+    _request_with_retries,
     classify_attribute,
     extract_npu_objectid,
     fetch_layer_metadata,
@@ -23,9 +27,10 @@ def test_extract_npu_objectid_prefers_objectid() -> None:
 
 def test_classify_attribute_routes() -> None:
     """Attributes map to tag / url / temporal / text."""
-    assert classify_attribute(
-        "TYP", "hrad", tag_fields={"TYP"}, url_fields=set()
-    ) == ("tag", "hrad")
+    assert classify_attribute("TYP", "hrad", tag_fields={"TYP"}, url_fields=set()) == (
+        "tag",
+        "hrad",
+    )
     assert classify_attribute(
         "ODKAZ",
         "https://example.com/a",
@@ -47,10 +52,51 @@ def test_classify_attribute_routes() -> None:
     assert kind == "temporal"
     assert isinstance(value, datetime)
     assert value.tzinfo == UTC
-    assert classify_attribute(
-        "NAZEV", "Karlštejn", tag_fields=set(), url_fields=set()
-    ) == ("text", "Karlštejn")
+    assert classify_attribute("NAZEV", "Karlštejn", tag_fields=set(), url_fields=set()) == (
+        "text",
+        "Karlštejn",
+    )
     assert classify_attribute("OBJECTID", 1, tag_fields=set(), url_fields=set()) is None
+
+
+def test_classify_cp_uap_pvo_defaults() -> None:
+    """CP_UAP_PVO field defaults map to tags / urls / temporal."""
+    tags = {
+        "Subtyp",
+        "typOchranyKod",
+        "typOchranyNazev",
+        "fazeOchranyKod",
+        "fazeOchranyNazev",
+        "PrStavNazev",
+    }
+    urls = {"urlExt", "urlInt"}
+    temporals = {"platn_od", "platn_do", "aktual", "datumStavuOchrany"}
+    assert classify_attribute(
+        "Subtyp", "NKP", tag_fields=tags, url_fields=urls, temporal_fields=temporals
+    ) == ("tag", "NKP")
+    assert classify_attribute(
+        "urlExt",
+        "https://npu.cz/a",
+        tag_fields=tags,
+        url_fields=urls,
+        temporal_fields=temporals,
+    ) == ("url", "https://npu.cz/a")
+    kind, value = classify_attribute(
+        "platn_od",
+        1_700_000_000_000,
+        tag_fields=tags,
+        url_fields=urls,
+        temporal_fields=temporals,
+    ) or (None, None)
+    assert kind == "temporal"
+    assert isinstance(value, datetime)
+
+
+def test_sync_headers_identify_bot() -> None:
+    """Sync client advertises YourSyncBot/1.0."""
+    assert SYNC_USER_AGENT == "YourSyncBot/1.0"
+    assert SYNC_HEADERS["User-Agent"] == "YourSyncBot/1.0"
+    assert SYNC_HEADERS["Accept"] == "application/json"
 
 
 def test_fetch_metadata_and_pagination() -> None:
@@ -58,6 +104,7 @@ def test_fetch_metadata_and_pagination() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        assert request.headers.get("User-Agent") == SYNC_USER_AGENT
         if path.endswith("/0"):
             return httpx.Response(
                 200,
@@ -98,16 +145,51 @@ def test_fetch_metadata_and_pagination() -> None:
 
     transport = httpx.MockTransport(handler)
     with httpx.Client(transport=transport) as client:
-        meta = fetch_layer_metadata(client, "https://example.test/FeatureServer/0")
+        meta = fetch_layer_metadata(client, "https://example.test/MapServer/0")
         assert meta.max_record_count == 2
         assert meta.supports_pagination is True
         pages = list(
             iter_geojson_pages(
                 client,
-                "https://example.test/FeatureServer/0",
+                "https://example.test/MapServer/0",
                 page_size=2,
             )
         )
     assert len(pages) == 2
     assert len(pages[0]) == 2
     assert len(pages[1]) == 1
+
+
+def test_request_retries_on_429(monkeypatch: pytest.MonkeyPatch) -> None:
+    """429 responses are retried with backoff then succeed."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        "sample_db_backend.sync.npu_geoportal.time.sleep",
+        lambda s: sleeps.append(s),
+    )
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(429, json={"error": "rate"})
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport) as client:
+        response = _request_with_retries(client, "GET", "https://example.test/x")
+    assert response.status_code == 200
+    assert calls["n"] == 3
+    assert len(sleeps) == 2
+
+
+def test_config_defaults_match_cp_uap_pvo() -> None:
+    """Settings defaults lock MapServer URL and CP_UAP_PVO field maps."""
+    from sample_db_backend.config import Settings
+
+    settings = Settings(_env_file=None)
+    assert settings.npu_layer_url is not None
+    assert settings.npu_layer_url.endswith("/Tematicke/CP_UAP_PVO/MapServer/0")
+    assert "Subtyp" in (settings.npu_tag_fields or "")
+    assert "urlExt" in (settings.npu_url_fields or "")
+    assert "platn_od" in (settings.npu_temporal_fields or "")

@@ -16,7 +16,7 @@ Artifacts: [notes-for-data-model.sql](./notes-for-data-model.sql) · [notes-for-
 | --- | --- | --- |
 | HTTP API | `src/sample_db_backend/` | FastAPI routes, Pydantic validation (`422`) |
 | Services | `services/layers.py` | Layers / objects / typed props / tags / URLs |
-| NPÚ sync | `sync/npu_geoportal.py` | Paged FeatureServer fetch + upsert (CLI `sample-db-npu-sync`) |
+| NPÚ sync | `sync/npu_geoportal.py` | Paged MapServer fetch + upsert (CLI `sample-db-npu-sync`) |
 | Persistence | `db.py` + SQL | `DATABASE_URL` or in-memory stub |
 | Migrations | `migrations/*.sql` | Versioned SQL (`001` schema, `002` NPÚ keys) |
 | CI | `.github/workflows/ci.yml` | Ruff + pytest |
@@ -65,7 +65,7 @@ Practices: [npu-geoportal-sync.md](./npu-geoportal-sync.md) (do not invent a dif
 
 | NPÚ source | App target |
 | --- | --- |
-| FeatureServer layer root + metadata `name` | `map_layers` (`source_url`, `source_key=npu:<url>`, `name`) |
+| MapServer layer root + metadata `name` | `map_layers` (`source_url`, `source_key=npu:<url>`, `name`) |
 | Feature `geometry` (WGS84 GeoJSON) | `layer_objects.geometry` (JSONB) |
 | `properties.OBJECTID` or `properties.id` | `layer_objects.npu_objectid` (sync key) |
 | Attributes in `NPU_TAG_FIELDS` (default `TYP,KATEGORIE,DRUH,STATUS,TYP_PAM`) | `tags` + `layer_object_tags` |
@@ -78,7 +78,7 @@ Practices: [npu-geoportal-sync.md](./npu-geoportal-sync.md) (do not invent a dif
 
 | Env | Purpose |
 | --- | --- |
-| `NPU_LAYER_URL` | ArcGIS **layer root** (`…/FeatureServer/0`). Placeholder OK until exact Geoportal layer chosen — see `.env.example` |
+| `NPU_LAYER_URL` | Locked MapServer layer root `…/Tematicke/CP_UAP_PVO/MapServer/0` — see `.env.example` |
 | `NPU_LAYER_NAME` | Optional override for `map_layers.name` |
 | `NPU_TAG_FIELDS` / `NPU_URL_FIELDS` | Comma-separated attribute → tags / URLs |
 
@@ -115,4 +115,4 @@ Then optional: `uv run sample-db-npu-sync` for initial fill. Schedule weekly/mon
 
 ## 7. Out of scope here
 
-Auth, PostGIS spatial ops, Storage upload helpers, live NPÚ URL selection (config placeholder), Alembic, frontend map UI.
+Auth, PostGIS spatial ops, Storage upload helpers, Alembic, frontend map UI, live Railway deploy (stage 7).

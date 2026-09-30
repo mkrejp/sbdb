@@ -71,6 +71,8 @@ class Layer(BaseModel):
     id: UUID
     name: str
     description: str
+    source_key: str | None = None
+    source_url: str | None = None
     created_at: datetime
     updated_at: datetime
 

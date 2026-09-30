@@ -1,0 +1,17 @@
+---
+description: Sample DB backend standing rules (mirrors docs/agents-instructions.md §3–6)
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# Sample DB backend — thin Cursor rules
+
+- **Stack:** Python FastAPI + Supabase Postgres + GitHub Actions + Railway (Free default).
+- **No secrets in git:** never commit `DATABASE_URL`, tokens, or passwords; `.env.example` has no real values.
+- **Validation:** FastAPI request validation → HTTP **422**.
+- **SQL:** parameterized queries only; versioned `migrations/*.sql` via `psql` (no Alembic).
+- **NPÚ fill:** MapServer layer `…/Tematicke/CP_UAP_PVO/MapServer/0`; page with `resultOffset` / `resultRecordCount`; never assume one `where=1=1` returns all rows.
+- **NPÚ live sync:** prefer user WSL (`/home/cursor/dev/genesis`); cloud IPs may be WAF-blocked — do not burn retries from blocked egress.
+- **Cost:** stay free-tier; no paid APM/auth/frontend/PostGIS in this slice unless the user expands scope.
+- **Ask immediately** on missing CLI/SSH credentials or API keys — do not spin.

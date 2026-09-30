@@ -79,6 +79,9 @@ def _url(row: dict[str, Any]) -> ObjectUrl:
 # --- layers ------------------------------------------------------------------
 
 
+_LAYER_COLS = "id, name, description, source_key, source_url, created_at, updated_at"
+
+
 def list_layers(*, limit: int = 50) -> list[Layer]:
     """List layers newest-first."""
     if not database_configured():
@@ -86,8 +89,8 @@ def list_layers(*, limit: int = 50) -> list[Layer]:
         return [_layer(r) for r in rows]
     with get_connection() as conn:
         rows = conn.execute(
-            """
-            SELECT id, name, description, created_at, updated_at
+            f"""
+            SELECT {_LAYER_COLS}
             FROM map_layers ORDER BY created_at DESC LIMIT %s
             """,
             (limit,),
@@ -104,7 +107,7 @@ def get_layer(layer_id: UUID) -> Layer:
         raise NotFoundError(str(layer_id))
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT id, name, description, created_at, updated_at FROM map_layers WHERE id = %s",
+            f"SELECT {_LAYER_COLS} FROM map_layers WHERE id = %s",
             (layer_id,),
         ).fetchone()
     if row is None:
@@ -120,6 +123,8 @@ def create_layer(payload: LayerCreate) -> Layer:
             "id": uuid4(),
             "name": payload.name,
             "description": payload.description,
+            "source_key": None,
+            "source_url": None,
             "created_at": now,
             "updated_at": now,
         }
@@ -127,9 +132,9 @@ def create_layer(payload: LayerCreate) -> Layer:
         return _layer(row)
     with get_connection() as conn:
         row = conn.execute(
-            """
+            f"""
             INSERT INTO map_layers (name, description) VALUES (%s, %s)
-            RETURNING id, name, description, created_at, updated_at
+            RETURNING {_LAYER_COLS}
             """,
             (payload.name, payload.description),
         ).fetchone()
@@ -154,8 +159,7 @@ def update_layer(layer_id: UUID, payload: LayerUpdate) -> Layer:
     values: list[Any] = list(data.values()) + [layer_id]
     with get_connection() as conn:
         row = conn.execute(
-            f"UPDATE map_layers SET {', '.join(sets)} WHERE id = %s "
-            "RETURNING id, name, description, created_at, updated_at",
+            f"UPDATE map_layers SET {', '.join(sets)} WHERE id = %s RETURNING {_LAYER_COLS}",
             values,
         ).fetchone()
         conn.commit()
@@ -219,10 +223,7 @@ def list_objects(
         params.append(layer_id)
     join = ""
     if tag is not None:
-        join = (
-            "JOIN layer_object_tags ot ON ot.object_id = o.id "
-            "JOIN tags t ON t.id = ot.tag_id"
-        )
+        join = "JOIN layer_object_tags ot ON ot.object_id = o.id JOIN tags t ON t.id = ot.tag_id"
         clauses.append("t.name = %s")
         params.append(tag)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -355,8 +356,7 @@ def list_properties(object_id: UUID) -> list[ObjectProperty]:
         return [_prop(p) for p in stub_properties() if p["object_id"] == object_id]
     with get_connection() as conn:
         rows = conn.execute(
-            f"SELECT {_PROP_COLS} FROM layer_object_properties "
-            "WHERE object_id = %s ORDER BY key",
+            f"SELECT {_PROP_COLS} FROM layer_object_properties WHERE object_id = %s ORDER BY key",
             (object_id,),
         ).fetchall()
     return [_prop(dict(r)) for r in rows]
@@ -620,9 +620,7 @@ def attach_tag(object_id: UUID, tag_id: UUID) -> None:
         for link in stub_object_tags():
             if link["object_id"] == object_id and link["tag_id"] == tag_id:
                 return
-        stub_object_tags().append(
-            {"object_id": object_id, "tag_id": tag_id, "created_at": _now()}
-        )
+        stub_object_tags().append({"object_id": object_id, "tag_id": tag_id, "created_at": _now()})
         return
     with get_connection() as conn:
         conn.execute(

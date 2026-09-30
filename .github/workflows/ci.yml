@@ -15,8 +15,10 @@ jobs:
           enable-cache: true
       - name: Sync deps
         run: uv sync --group dev
-      - name: Ruff
+      - name: Ruff lint
         run: uv run ruff check src tests
+      - name: Ruff format
+        run: uv run ruff format --check src tests
 
   test:
     runs-on: ubuntu-latest

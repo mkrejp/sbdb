@@ -1,28 +1,33 @@
 """NPÚ Geoportal REST → Postgres mirror (safe pagination).
 
 Follows docs/npu-geoportal-sync.md:
-- Read layer metadata for maxRecordCount / supportsPagination
-- Page with resultOffset + resultRecordCount
+- Read MapServer layer metadata for maxRecordCount / supportsPagination
+- Page with resultOffset + resultRecordCount (client cap ≤1000)
 - Request GeoJSON outSR=4326
 - Upsert by NPÚ OBJECTID/id into layer_objects.npu_objectid
-- Stream page → upsert (free-tier friendly; avoid holding huge layers in memory)
+- One DB transaction per page; stream page → upsert
+- Headers: User-Agent YourSyncBot/1.0, Accept application/json
+- Retry 429/5xx with exponential backoff
 
-Usage::
+Usage (prefer user WSL when cloud IPs are WAF-blocked)::
 
+    # /home/cursor/dev/genesis
     uv run sample-db-npu-sync
 
 Env:
     DATABASE_URL              required for upsert
-    NPU_LAYER_URL             FeatureServer/MapServer *layer root* (…/FeatureServer/0)
+    NPU_LAYER_URL             MapServer *layer root* (…/MapServer/0); locked CP_UAP_PVO default
     NPU_LAYER_NAME            optional display name for map_layers
-    NPU_TAG_FIELDS            comma-separated attribute names → tags (optional)
-    NPU_URL_FIELDS            comma-separated attribute names → object URLs (optional)
+    NPU_TAG_FIELDS            comma-separated attribute names → tags
+    NPU_URL_FIELDS            comma-separated attribute names → object URLs
+    NPU_TEMPORAL_FIELDS       comma-separated attribute names → temporal properties
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -37,6 +42,12 @@ from psycopg.types.json import Jsonb
 from sample_db_backend.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+SYNC_USER_AGENT = "YourSyncBot/1.0"
+SYNC_HEADERS = {
+    "User-Agent": SYNC_USER_AGENT,
+    "Accept": "application/json",
+}
 
 _SKIP_PROP_KEYS = frozenset(
     {
@@ -54,6 +65,9 @@ _SKIP_PROP_KEYS = frozenset(
 
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 _EPOCH_MS_MIN = 1_000_000_000_000  # ~2001 in ms
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+_MAX_RETRIES = 4
+_BACKOFF_BASE_S = 0.5
 
 
 @dataclass(frozen=True)
@@ -83,10 +97,53 @@ def _normalize_layer_root(url: str) -> str:
     return cleaned
 
 
+def _request_with_retries(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    *,
+    params: dict[str, str] | None = None,
+) -> httpx.Response:
+    """HTTP request with backoff on 429/5xx."""
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            response = client.request(method, url, params=params, headers=SYNC_HEADERS)
+            if response.status_code in _RETRYABLE_STATUS and attempt < _MAX_RETRIES:
+                wait = _BACKOFF_BASE_S * (2**attempt)
+                logger.warning(
+                    "npu_http_retry status=%s attempt=%s wait_s=%.1f url=%s",
+                    response.status_code,
+                    attempt + 1,
+                    wait,
+                    url,
+                )
+                time.sleep(wait)
+                continue
+            response.raise_for_status()
+            return response
+        except httpx.HTTPStatusError:
+            raise
+        except httpx.TransportError as exc:
+            last_exc = exc
+            if attempt >= _MAX_RETRIES:
+                break
+            wait = _BACKOFF_BASE_S * (2**attempt)
+            logger.warning(
+                "npu_http_transport_retry attempt=%s wait_s=%.1f error=%s url=%s",
+                attempt + 1,
+                wait,
+                type(exc).__name__,
+                url,
+            )
+            time.sleep(wait)
+    assert last_exc is not None
+    raise last_exc
+
+
 def fetch_layer_metadata(client: httpx.Client, layer_root: str) -> LayerMeta:
     """GET layer root metadata JSON; require pagination support."""
-    response = client.get(layer_root, params={"f": "json"})
-    response.raise_for_status()
+    response = _request_with_retries(client, "GET", layer_root, params={"f": "json"})
     data = response.json()
     if "error" in data:
         raise RuntimeError(f"Layer metadata error: {data['error']}")
@@ -106,7 +163,7 @@ def fetch_layer_metadata(client: httpx.Client, layer_root: str) -> LayerMeta:
 
 
 def _page_size(meta: LayerMeta) -> int:
-    """Client page size at or below server maxRecordCount."""
+    """Client page size at or below server maxRecordCount (cap 1000)."""
     return max(1, min(meta.max_record_count, 1000))
 
 
@@ -128,8 +185,7 @@ def iter_geojson_pages(
             "resultOffset": str(offset),
             "resultRecordCount": str(page_size),
         }
-        response = client.get(query_url, params=params)
-        response.raise_for_status()
+        response = _request_with_retries(client, "GET", query_url, params=params)
         payload = response.json()
         if isinstance(payload, dict) and "error" in payload:
             raise RuntimeError(f"Query error at offset {offset}: {payload['error']}")
@@ -187,12 +243,21 @@ def _parse_temporal(value: Any) -> datetime | None:
     return None
 
 
+def _field_match(key: str, fields: set[str]) -> bool:
+    """Case-insensitive membership for configured NPÚ field names."""
+    if key in fields:
+        return True
+    lower = key.lower()
+    return lower in {f.lower() for f in fields}
+
+
 def classify_attribute(
     key: str,
     value: Any,
     *,
     tag_fields: set[str],
     url_fields: set[str],
+    temporal_fields: set[str] | None = None,
 ) -> tuple[str, Any] | None:
     """Map one NPÚ attribute into (kind, payload).
 
@@ -200,14 +265,19 @@ def classify_attribute(
     """
     if value is None or value == "" or _is_skip_key(key):
         return None
+    temporal_fields = temporal_fields or set()
     lower = key.lower()
-    if key in tag_fields or lower in {t.lower() for t in tag_fields}:
+    if _field_match(key, tag_fields):
         return ("tag", str(value).strip())
-    if key in url_fields or lower in {u.lower() for u in url_fields}:
+    if _field_match(key, url_fields):
         return ("url", str(value).strip())
     if isinstance(value, str) and _URL_RE.match(value.strip()):
         return ("url", value.strip())
     temporal = _parse_temporal(value)
+    if _field_match(key, temporal_fields):
+        if temporal is not None:
+            return ("temporal", temporal)
+        return ("text", str(value))
     dateish = "date" in lower or "datum" in lower or "time" in lower
     if temporal is not None and (dateish or isinstance(value, (int, float))):
         return ("temporal", temporal)
@@ -249,6 +319,7 @@ def upsert_feature(
     feature: dict[str, Any],
     tag_fields: set[str],
     url_fields: set[str],
+    temporal_fields: set[str] | None = None,
 ) -> bool:
     """Upsert one GeoJSON Feature into layer_objects + children. Returns True if keyed."""
     props = dict(feature.get("properties") or {})
@@ -283,7 +354,13 @@ def upsert_feature(
 
     url_order = 0
     for key, value in props.items():
-        mapped = classify_attribute(key, value, tag_fields=tag_fields, url_fields=url_fields)
+        mapped = classify_attribute(
+            key,
+            value,
+            tag_fields=tag_fields,
+            url_fields=url_fields,
+            temporal_fields=temporal_fields,
+        )
         if mapped is None:
             continue
         kind, payload = mapped
@@ -345,20 +422,22 @@ def sync_layer(
     layer_name: str | None = None,
     tag_fields: set[str] | None = None,
     url_fields: set[str] | None = None,
+    temporal_fields: set[str] | None = None,
     timeout_s: float = 60.0,
 ) -> SyncStats:
-    """Fetch NPÚ layer pages and upsert into Postgres (JSONB geometry)."""
+    """Fetch NPÚ layer pages and upsert into Postgres (one txn per page)."""
     layer_root = _normalize_layer_root(layer_url)
     source_key = f"npu:{layer_root}"
     tags = tag_fields or set()
     urls = url_fields or set()
+    temporals = temporal_fields or set()
 
-    with httpx.Client(timeout=timeout_s, follow_redirects=True) as client:
+    with httpx.Client(timeout=timeout_s, follow_redirects=True, headers=SYNC_HEADERS) as client:
         meta = fetch_layer_metadata(client, layer_root)
         page_size = _page_size(meta)
         display_name = layer_name or meta.name
         logger.info(
-            "NPÚ sync %s maxRecordCount=%s page_size=%s supportsPagination=%s",
+            "npu_sync_start layer=%s maxRecordCount=%s page_size=%s supportsPagination=%s",
             layer_root,
             meta.max_record_count,
             page_size,
@@ -381,17 +460,32 @@ def sync_layer(
             for page in iter_geojson_pages(client, layer_root, page_size=page_size):
                 pages += 1
                 features_total += len(page)
-                for feature in page:
-                    if upsert_feature(
-                        conn,
-                        layer_id=layer_id,
-                        feature=feature,
-                        tag_fields=tags,
-                        url_fields=urls,
-                    ):
-                        upserted += 1
-                conn.commit()
-                logger.info("Committed page %s (%s features)", pages, len(page))
+                try:
+                    for feature in page:
+                        if upsert_feature(
+                            conn,
+                            layer_id=layer_id,
+                            feature=feature,
+                            tag_fields=tags,
+                            url_fields=urls,
+                            temporal_fields=temporals,
+                        ):
+                            upserted += 1
+                    conn.commit()
+                    logger.info(
+                        "npu_sync_page pages=%s features=%s upserted_total=%s",
+                        pages,
+                        len(page),
+                        upserted,
+                    )
+                except Exception:
+                    conn.rollback()
+                    logger.exception(
+                        "npu_sync_page_failed pages=%s features=%s",
+                        pages,
+                        len(page),
+                    )
+                    raise
 
     return SyncStats(
         pages=pages,
@@ -415,8 +509,8 @@ def main() -> None:
         raise SystemExit("DATABASE_URL is required for NPÚ sync")
     if not settings.npu_layer_url:
         raise SystemExit(
-            "NPU_LAYER_URL is required (ArcGIS FeatureServer/MapServer layer root). "
-            "See docs/npu-geoportal-sync.md — placeholder example in .env.example."
+            "NPU_LAYER_URL is required (MapServer layer root). "
+            "See docs/npu-geoportal-sync.md — locked CP_UAP_PVO default in .env.example."
         )
 
     stats = sync_layer(
@@ -425,9 +519,10 @@ def main() -> None:
         layer_name=settings.npu_layer_name,
         tag_fields=_parse_csv_set(settings.npu_tag_fields),
         url_fields=_parse_csv_set(settings.npu_url_fields),
+        temporal_fields=_parse_csv_set(settings.npu_temporal_fields),
     )
     logger.info(
-        "Done pages=%s features=%s upserted=%s layer_id=%s",
+        "npu_sync_done pages=%s features=%s upserted=%s layer_id=%s",
         stats.pages,
         stats.features,
         stats.upserted,
