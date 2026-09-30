@@ -1,0 +1,7 @@
+{
+  "name": "Národní kulturní památky",
+  "maxRecordCount": 2000,
+  "advancedQueryCapabilities": {
+    "supportsPagination": true
+  }
+}

@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# NPÚ Geoportal sync — bash orchestrator (wget fetch + Python insert).
+#
+# Marek flow:
+#   1. wget -O pamatky.json   → object **list** (returnIdsOnly pages)
+#   2. for each OBJECTID (small batches): wget detail GeoJSON
+#   3. Python transform + upsert into Postgres (DATABASE_URL)
+#
+# Usage (WSL preferred)::
+#
+#   cd /home/cursor/dev/genesis
+#   export DATABASE_URL=…   # Supabase pooler
+#   timeout 300 ./scripts/sample-db-npu-sync
+#   # or: timeout 300 uv run sample-db-npu-sync
+#
+# Env:
+#   DATABASE_URL          required
+#   NPU_LAYER_URL         MapServer layer root (default CP_UAP_PVO/0)
+#   NPU_LAYER_NAME        optional display name
+#   NPU_TAG_FIELDS / NPU_URL_FIELDS / NPU_TEMPORAL_FIELDS
+#   NPU_DETAIL_BATCH      OBJECTIDs per detail wget (default 10)
+#   NPU_WGET_TIMEOUT      seconds per wget (default 60)
+#   NPU_MAX_RETRIES       retries after first try (default 3 → 4 attempts)
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${REPO_ROOT}"
+
+DEFAULT_LAYER_URL='https://geoportal.npu.cz/arcgis/rest/services/Tematicke/CP_UAP_PVO/MapServer/0'
+NPU_LAYER_URL="${NPU_LAYER_URL:-${DEFAULT_LAYER_URL}}"
+NPU_DETAIL_BATCH="${NPU_DETAIL_BATCH:-10}"
+NPU_WGET_TIMEOUT="${NPU_WGET_TIMEOUT:-60}"
+NPU_MAX_RETRIES="${NPU_MAX_RETRIES:-3}"
+SYNC_UA='YourSyncBot/1.0'
+SYNC_ACCEPT='application/json'
+BACKOFF_BASE=1
+
+# Prefer uv-run Python when available (repo venv); else bare python3 + PYTHONPATH.
+if command -v uv >/dev/null 2>&1; then
+  PY=(uv run python -m sample_db_backend.sync.npu_geoportal)
+else
+  export PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+  PY=(python3 -m sample_db_backend.sync.npu_geoportal)
+fi
+
+log() { printf 'INFO %s\n' "$*" >&2; }
+warn() { printf 'WARN %s\n' "$*" >&2; }
+die() { printf 'ERROR %s\n' "$*" >&2; exit 1; }
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+need_cmd wget
+need_cmd mktemp
+
+if [[ -z "${DATABASE_URL:-}" ]]; then
+  die "DATABASE_URL is required for NPÚ sync"
+fi
+
+# Strip trailing /query
+LAYER_ROOT="${NPU_LAYER_URL%/}"
+if [[ "${LAYER_ROOT,,}" == */query ]]; then
+  LAYER_ROOT="${LAYER_ROOT%/[Qq][Uu][Ee][Rr][Yy]}"
+  LAYER_ROOT="${LAYER_ROOT%/}"
+fi
+QUERY_URL="${LAYER_ROOT}/query"
+
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/npu-sync.XXXXXX")"
+cleanup() { rm -rf "${TMP}"; }
+trap cleanup EXIT
+
+# --- wget with 1 try + NPU_MAX_RETRIES retries (bash owns retries) ---
+wget_retry() {
+  # usage: wget_retry OUT_PATH URL
+  local out="$1"
+  local url="$2"
+  local attempt=0
+  local max="${NPU_MAX_RETRIES}"
+  local wait rc
+  while true; do
+    set +e
+    wget -O "${out}" \
+      --user-agent="${SYNC_UA}" \
+      --header="Accept: ${SYNC_ACCEPT}" \
+      --timeout="${NPU_WGET_TIMEOUT}" \
+      --tries=1 \
+      --no-verbose \
+      "${url}"
+    rc=$?
+    set -e
+    if (( rc == 0 )) && [[ -s "${out}" ]]; then
+      return 0
+    fi
+    if (( rc == 0 )); then
+      warn "wget wrote empty body url=${url}"
+    else
+      warn "wget failed exit=${rc} url=${url}"
+    fi
+    if (( attempt >= max )); then
+      die "wget failed after $((max + 1)) attempts: ${url}"
+    fi
+    wait=$((BACKOFF_BASE * (1 << attempt)))
+    warn "npu_wget_retry attempt=$((attempt + 1)) wait_s=${wait} url=${url}"
+    sleep "${wait}"
+    attempt=$((attempt + 1))
+  done
+}
+
+# --- 0) Layer metadata (paging caps + display name) ---
+META_JSON="${TMP}/meta.json"
+log "npu_fetch_meta url=${LAYER_ROOT}?f=json"
+wget_retry "${META_JSON}" "${LAYER_ROOT}?f=json"
+
+PAGE_SIZE="$("${PY[@]}" page-size "${META_JSON}")"
+LAYER_NAME="$("${PY[@]}" layer-name "${META_JSON}" --override "${NPU_LAYER_NAME:-}")"
+log "npu_sync_start layer=${LAYER_ROOT} page_size=${PAGE_SIZE} detail_batch=${NPU_DETAIL_BATCH} name=${LAYER_NAME}"
+
+LAYER_ID="$("${PY[@]}" ensure-layer --layer-url "${LAYER_ROOT}" --name "${LAYER_NAME}" --database-url "${DATABASE_URL}")"
+log "npu_layer_id=${LAYER_ID}"
+
+TAG_ARGS=()
+[[ -n "${NPU_TAG_FIELDS:-}" ]] && TAG_ARGS+=(--tag-fields "${NPU_TAG_FIELDS}")
+URL_ARGS=()
+[[ -n "${NPU_URL_FIELDS:-}" ]] && URL_ARGS+=(--url-fields "${NPU_URL_FIELDS}")
+TEMP_ARGS=()
+[[ -n "${NPU_TEMPORAL_FIELDS:-}" ]] && TEMP_ARGS+=(--temporal-fields "${NPU_TEMPORAL_FIELDS}")
+
+# --- 1) Paginated object **list** → pamatky.json ---
+offset=0
+list_pages=0
+total_ids=0
+total_upserted=0
+total_features=0
+
+while true; do
+  PAMATKY_JSON="${TMP}/pamatky.json"
+  LIST_URL="${QUERY_URL}?where=1%3D1&returnIdsOnly=true&returnGeometry=false&resultOffset=${offset}&resultRecordCount=${PAGE_SIZE}&f=json"
+  log "npu_fetch_list offset=${offset} page_size=${PAGE_SIZE}"
+  wget_retry "${PAMATKY_JSON}" "${LIST_URL}"
+  list_pages=$((list_pages + 1))
+
+  mapfile -t IDS < <("${PY[@]}" extract-ids "${PAMATKY_JSON}")
+  count=${#IDS[@]}
+  if (( count == 0 )); then
+    log "npu_list_empty offset=${offset} — done"
+    break
+  fi
+  total_ids=$((total_ids + count))
+  log "npu_list_page pages=${list_pages} ids=${count} offset=${offset}"
+
+  # --- 2) For each small batch of IDs: wget **detail** → 3) Python insert ---
+  i=0
+  while (( i < count )); do
+    batch=()
+    for (( j = 0; j < NPU_DETAIL_BATCH && i < count; j++, i++ )); do
+      batch+=("${IDS[i]}")
+    done
+    # Join OBJECTIDs with commas (ArcGIS objectIds=)
+    IFS=,
+    id_csv="${batch[*]}"
+    unset IFS
+
+    DETAIL_JSON="${TMP}/detail.json"
+    # objectIds are digits + commas only — safe unencoded
+    DETAIL_URL="${QUERY_URL}?objectIds=${id_csv}&outFields=*&outSR=4326&returnGeometry=true&f=geojson"
+    log "npu_fetch_detail objectIds=${id_csv}"
+    wget_retry "${DETAIL_JSON}" "${DETAIL_URL}"
+
+    result="$("${PY[@]}" upsert-file "${DETAIL_JSON}" \
+      --layer-id "${LAYER_ID}" \
+      --database-url "${DATABASE_URL}" \
+      "${TAG_ARGS[@]}" "${URL_ARGS[@]}" "${TEMP_ARGS[@]}")"
+    # result like "3/3"
+    up="${result%%/*}"
+    feat="${result##*/}"
+    total_upserted=$((total_upserted + up))
+    total_features=$((total_features + feat))
+    log "npu_upsert_batch upserted=${up} features=${feat} total_upserted=${total_upserted}"
+  done
+
+  if (( count < PAGE_SIZE )); then
+    break
+  fi
+  offset=$((offset + count))
+done
+
+log "npu_sync_done list_pages=${list_pages} ids=${total_ids} features=${total_features} upserted=${total_upserted} layer_id=${LAYER_ID}"

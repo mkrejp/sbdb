@@ -78,10 +78,11 @@ Design artifact label: **notes-for-data-model**. Domain is **GeoJSON map layers*
 - Portal: https://npu.cz · host: `geoportal.npu.cz`  
 - **`NPU_LAYER_URL`:**  
   `https://geoportal.npu.cz/arcgis/rest/services/Tematicke/CP_UAP_PVO/MapServer/0`  
-- Page with `resultOffset` / `resultRecordCount`; respect `maxRecordCount` (often 2000). Never assume a single `where=1=1` returns all rows.  
+- Flow: **bash** orchestrates; **wget** fetches ID list (`returnIdsOnly` → `pamatky.json`) then per-object/small-batch **detail**; **Python** transforms + upserts only.  
+- Page ID lists with `resultOffset` / `resultRecordCount`; respect `maxRecordCount` (often 2000). Never assume a single `where=1=1` returns all rows.  
 - Upsert on `OBJECTID` / `id` → `npu_objectid`.  
-- CLI: `uv run sample-db-npu-sync` (see repo sync module).  
-- Request headers used in probes: `User-Agent: YourSyncBot/1.0`, `Accept: application/json`.  
+- CLI: `./scripts/sample-db-npu-sync` or `uv run sample-db-npu-sync` (thin wrapper → bash).  
+- Request headers: `User-Agent: YourSyncBot/1.0`, `Accept: application/json`.  
 - **Cloud agent IPs may be WAF-blocked** on `/query`; prefer running sync from the user’s WSL/network.
 
 Practices detail: `docs/npu-geoportal-sync.md` (and Project Context mirror).

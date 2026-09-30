@@ -1,0 +1,29 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "OBJECTID": 101,
+        "nazev": "Karlštejn",
+        "Subtyp": "NKP",
+        "urlExt": "https://npu.cz/a"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [14.188, 49.939]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "OBJECTID": 102,
+        "nazev": "Other"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [15.0, 50.0]
+      }
+    }
+  ]
+}

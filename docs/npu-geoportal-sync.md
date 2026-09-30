@@ -1,8 +1,24 @@
 # NPÚ Geoportal REST — mirror & sync practices
 
-Initial data fill for map layers comes from the **NPÚ Geoportal REST Services** (ArcGIS). NPÚ primarily publishes via **MapServer** (read-only query), not editable FeatureServer. MapServer layers expose the same query operations used here (`f=geojson`, pagination, etc.).
+Initial data fill for map layers comes from the **NPÚ Geoportal REST Services** (ArcGIS). NPÚ primarily publishes via **MapServer** (read-only query), not editable FeatureServer. MapServer layers expose the same query operations used here (`f=json` / `f=geojson`, pagination, `returnIdsOnly`, `objectIds=`).
 
 Portal entry: [npu.cz](https://npu.cz) · REST directory: [geoportal.npu.cz/arcgis/rest/services](https://geoportal.npu.cz/arcgis/rest/services)
+
+## Architecture (bash + wget + Python insert)
+
+| Role | Owns |
+| --- | --- |
+| **Bash** (`scripts/sample-db-npu-sync`) | Orchestration: pages, retries, temp files, timeouts |
+| **wget only** | All HTTP fetches from NPÚ / source |
+| **Python** (`sample_db_backend.sync.npu_geoportal`) | Parse/transform JSON + **inserts/upserts** into destination Postgres (`DATABASE_URL`) |
+
+Happy path: **no** httpx/requests/subprocess-wget inside Python for NPÚ.
+
+### Marek flow
+
+1. **`wget -O pamatky.json`** — fetch the object **list** JSON (`returnIdsOnly`).
+2. **For each** OBJECTID (small batches via `NPU_DETAIL_BATCH`, default 10): wget the **detail** GeoJSON.
+3. **Python** transforms + upserts into destination (one DB transaction per detail file).
 
 ## Locked layer (`NPU_LAYER_URL`)
 
@@ -12,55 +28,69 @@ Portal entry: [npu.cz](https://npu.cz) · REST directory: [geoportal.npu.cz/arcg
 | Name | Národní kulturní památky (Feature Layer, polygons) |
 | `maxRecordCount` | 2000 |
 | Pagination | `supportsPagination: true` |
-| Sync CLI | `uv run sample-db-npu-sync` (requires `DATABASE_URL`) |
+| Sync CLI | `./scripts/sample-db-npu-sync` or `uv run sample-db-npu-sync` (requires `DATABASE_URL`) |
 
-HTTP client: **GNU wget** (`wget -O <file.json> "<url>"`), not httpx. The portal
-entry `https://npu.cz` is not the object-list JSON; the sync uses the MapServer
-layer / query URLs below (Marek’s `-O` pattern, locked layer for data).
+`https://npu.cz` is the HTML portal only — **not** the object-list JSON.
 
-Example metadata fetch (object attributes / paging caps):
+## MapServer URLs (documented)
+
+Let `LAYER` = `$NPU_LAYER_URL` (layer root, no trailing `/query`).
+
+### 0) Metadata (paging caps + name)
+
+```bash
+wget -O meta.json \
+  --user-agent=YourSyncBot/1.0 \
+  --header='Accept: application/json' \
+  "${LAYER}?f=json"
+```
+
+### 1) Object **list** page → `pamatky.json`
 
 ```bash
 wget -O pamatky.json \
   --user-agent=YourSyncBot/1.0 \
   --header='Accept: application/json' \
-  'https://geoportal.npu.cz/arcgis/rest/services/Tematicke/CP_UAP_PVO/MapServer/0?f=json'
+  "${LAYER}/query?where=1%3D1&returnIdsOnly=true&returnGeometry=false&resultOffset=0&resultRecordCount=1000&f=json"
 ```
 
-Example query (paged GeoJSON features):
+Response shape: `{"objectIdFieldName":"OBJECTID","objectIds":[…]}`. Advance `resultOffset` by `len(objectIds)`; stop on empty / short page.
+
+### 2) Per-object (or small-batch) **detail**
 
 ```bash
-wget -O pamatky-page.json \
+wget -O detail.json \
   --user-agent=YourSyncBot/1.0 \
   --header='Accept: application/json' \
-  'https://geoportal.npu.cz/arcgis/rest/services/Tematicke/CP_UAP_PVO/MapServer/0/query?where=1%3D1&outFields=*&resultRecordCount=5&outSR=4326&f=geojson'
+  "${LAYER}/query?objectIds=101,102&outFields=*&outSR=4326&returnGeometry=true&f=geojson"
 ```
 
-`NPU_LAYER_URL` must be this concrete MapServer **layer root** (`…/MapServer/<id>`), not only `https://npu.cz`.
+### 3) Python insert
+
+```bash
+uv run python -m sample_db_backend.sync.npu_geoportal upsert-file detail.json \
+  --layer-id "$LAYER_ID" --database-url "$DATABASE_URL"
+```
+
+Upsert key: NPÚ `OBJECTID` → `layer_objects.npu_objectid` (per-page/detail-file transaction).
 
 ## Limits
 
 - Server enforces `maxRecordCount` (this layer: **2000**).
-- `where=1=1` on a large layer **truncates without warning** if you do not page.
-- Reliable sync: **paged architecture** via `resultOffset` / `resultRecordCount`.
+- Client list page size: **min(maxRecordCount, 1000)**.
+- `where=1=1` **without** paging truncates large layers — always page the ID list.
+- Detail batch size: `NPU_DETAIL_BATCH` (default **10**).
 
 ## Step 1 — Layer rules
 
-Before pulling, `wget -O` the **MapServer layer root** metadata JSON (`…/MapServer/<id>?f=json`) and note:
+Before pulling, wget the **MapServer layer root** metadata (`…/MapServer/<id>?f=json`) and note `maxRecordCount` / `supportsPagination`. wget sends `User-Agent: YourSyncBot/1.0` and `Accept: application/json`.
 
-- `maxRecordCount`
-- `supportsPagination: true` (often under `advancedQueryCapabilities`)
+## Step 2 — List → detail → insert (blueprint)
 
-Configure the client cap **at or below** that max (e.g. 1000). wget sends `User-Agent: YourSyncBot/1.0` and `Accept: application/json`.
-
-## Step 2 — Paged fetch (blueprint)
-
-1. Optional: `returnCountOnly=true` to learn total scope.
-2. Loop: `where=1=1`, `outFields=*`, `outSR=4326`, `f=geojson`, `resultOffset`, `resultRecordCount=MAX`.
-3. Advance offset by `len(features)`; stop when a page returns fewer than `MAX` (or empty).
-4. Stream into Postgres (do not hold huge layers entirely in memory).
-
-Identity: prefer `properties.OBJECTID` (this layer) as the **stable external key** for upserts.
+1. wget metadata → Python `page-size` / `layer-name` / `ensure-layer`.
+2. Loop ID-list pages (`returnIdsOnly` + `resultOffset` / `resultRecordCount`).
+3. For each small batch of IDs: wget detail GeoJSON → Python `upsert-file` (one txn).
+4. Retries: **1 try + 3 retries (= 4 attempts)** per URL in **bash** (`NPU_MAX_RETRIES`).
 
 ## Step 3 — Long-term sync into Postgres
 
@@ -68,7 +98,7 @@ Identity: prefer `properties.OBJECTID` (this layer) as the **stable external key
 | --- | --- | --- |
 | Primary keys | Identity binding | NPÚ `OBJECTID` → `layer_objects.npu_objectid` |
 | SQL storage | Upsert | `INSERT … ON CONFLICT (layer_id, npu_objectid) DO UPDATE …` |
-| Geometry | JSONB GeoJSON | This project; PostGIS `ST_GeomFromGeoJSON` optional later |
+| Geometry | JSONB GeoJSON | This project; PostGIS optional later |
 | Automation | Schedule | Weekly/monthly later (stage 7) |
 
 ## Project mapping (CP_UAP_PVO)
@@ -81,30 +111,28 @@ Identity: prefer `properties.OBJECTID` (this layer) as the **stable external key
 | `Subtyp`, `typOchranyKod`, `typOchranyNazev`, `fazeOchranyKod`, `fazeOchranyNazev`, `PrStavNazev` | `tags` / `layer_object_tags` |
 | `urlExt`, `urlInt` | `layer_object_urls` |
 | `platn_od`, `platn_do`, `aktual`, `datumStavuOchrany` | `layer_object_properties` (`temporal`) |
-| Other scalars (e.g. `nazev` / display fields) | `layer_object_properties` (`text`) |
+| Other scalars (e.g. `nazev`) | `layer_object_properties` (`text`) |
 
 ## Field-config defaults (`NPU_*`)
-
-Config / `.env.example` defaults match the CP_UAP_PVO mapping above:
 
 | Env | Default fields |
 | --- | --- |
 | `NPU_TAG_FIELDS` | `Subtyp,typOchranyKod,typOchranyNazev,fazeOchranyKod,fazeOchranyNazev,PrStavNazev` |
 | `NPU_URL_FIELDS` | `urlExt,urlInt` |
 | `NPU_TEMPORAL_FIELDS` | `platn_od,platn_do,aktual,datumStavuOchrany` |
-
-CLI uses **wget** (`-O` temp `pamatky.json`, then parse). Headers:
-`User-Agent: YourSyncBot/1.0`, `Accept: application/json`. Retries: **1 try + 3
-retries (= 4 attempts)** per URL on non-zero wget exit / bad JSON, then abort.
+| `NPU_DETAIL_BATCH` | `10` |
 
 ## Where to run live sync
 
-Free tier: page → upsert; **do not** full-mirror from cloud agents whose IPs are WAF-blocked on `/query`. Prefer the user’s **WSL** checkout:
+Free tier: list → detail → upsert; **do not** full-mirror from cloud agents whose IPs are WAF-blocked on `/query`. Prefer the user’s **WSL** checkout:
 
 ```bash
 # /home/cursor/dev/genesis
 export DATABASE_URL=…   # Supabase pooler
-uv run sample-db-npu-sync
+timeout 300 ./scripts/sample-db-npu-sync
+# or: timeout 300 uv run sample-db-npu-sync
 ```
 
-CI and cloud agents must mock NPÚ (`tests/test_npu_sync.py`); never hit `geoportal.npu.cz` from Actions.
+CI and cloud agents must use fixtures / mock wget (`tests/test_npu_sync.py`, `tests/test_npu_sync_bash.sh`); never hit `geoportal.npu.cz` from Actions.
+
+See also Project Context: `docs/npu-sync-wsl.md`.
