@@ -139,6 +139,7 @@ Use as intent history; current locks above override if anything conflicts.
 | Stage 5 (`stage-five-tooling-and-optimizations.md`) | Pipeline/app tooling + perf; Cursor-plan tooling |
 | Stage 6 (`stage-six-final-build-plans.md`) | Final build-agent work packages (implement **after user approves**) |
 | Stage 7 (`stage-seven-build-and-deploy.md`) | **Build** app image + deploy + DB updates + smoke |
+| Stage 8 (`stage-eight-eval-versioning.md`) | Live smoke, free-tier monitoring, semver/changelog, PR promotion |
 | `npu-geoportal-sync.md` | NPÚ pagination / upsert practices |
 | DNS notes for `sbdb.animarium.ai` | CNAME → Railway |
 
@@ -166,9 +167,9 @@ Use as intent history; current locks above override if anything conflicts.
 
 ## 10. Current handoff snapshot
 
-- Origin `main` includes framework + WP-A–E harden ([PR #4](https://cursor.com/codebase/marek-k-ejpsk/genesis/pull/4) merged).  
-- Supabase schema on **samplebackdb**.  
-- **Deploy topology:** Origin genesis → mirror to [mkrejp/sbdb](https://github.com/mkrejp/sbdb) (`release`) → Railway **zesty-adaptation** / **sbdb-api**. Shared vars staged/accepted: `DATABASE_URL`, `LOG_LEVEL`, `PUBLIC_HOSTNAME`.  
-- **Stage 7 in progress:** first GitHub mirror push may need write auth; Railway cannot connect until `mkrejp/sbdb` has `main`. Prefer WSL or authenticated `gh`/PAT for mirror.  
-- Live NPÚ `/query`: prefer WSL (cloud WAF).  
-- Stages 5–6 docs: tooling + [stage-six-final-build-plans.md](./stage-six-final-build-plans.md).
+- Origin `main` tip `b42d1c2` (#14 NPÚ attribute columns); mirrored to GitHub `mkrejp/sbdb` `main`; Railway **sbdb-api** SUCCESS on that SHA.  
+- Live: https://sbdb.animarium.ai — `/health` ok/connected; layers/objects with GeoJSON + NPÚ attrs.  
+- Supabase **samplebackdb**: migrations through `npu_attribute_columns` (004).  
+- **Deploy topology:** Origin genesis → Marek WSL mirror → [mkrejp/sbdb](https://github.com/mkrejp/sbdb) → Railway **zesty-adaptation** / **sbdb-api**. Agents do **not** push GitHub.  
+- **Stage 8:** [stage-eight-eval-versioning.md](./stage-eight-eval-versioning.md) — smoke + free-tier monitoring + **0.2.0** version/changelog promotion.  
+- Live NPÚ `/query`: prefer WSL (cloud WAF). Stage 9 = billing later.
