@@ -120,6 +120,8 @@ Use as intent history; current locks above override if anything conflicts.
 | This file (`docs/agents-instructions.md`) | Standing agent brief |
 | Stage 1–3 plans | Architecture, cost, DevOps/QA (Context and/or `docs/`) |
 | Stage 4 design (`notes-for-data-model.*`, API design) | Schema + API |
+| Stage 5 (`stage-five-tooling-and-optimizations.md`) | Pipeline/app tooling + perf; Cursor-plan tooling |
+| Stage 6 (`stage-six-final-build-plans.md`) | Final build-agent work packages (implement **after user approves**) |
 | `npu-geoportal-sync.md` | NPÚ pagination / upsert practices |
 | DNS notes for `sbdb.animarium.ai` | CNAME → Railway |
 
@@ -141,7 +143,7 @@ Use as intent history; current locks above override if anything conflicts.
 - Commit secrets or paste tokens into docs.  
 - Assume FeatureServer-only for NPÚ (MapServer is primary).  
 - Load entire NPÚ layers without pagination.  
-- Start full “build agent” implementation before stage 6 final plans (unless the user explicitly expands scope).
+- Start full “build agent” implementation before stage 6 final plans are **approved by the user**.
 
 ---
 
@@ -149,5 +151,8 @@ Use as intent history; current locks above override if anything conflicts.
 
 - Stage 4 framework merged to `main` via PR #1 (`775339a` on user clone).  
 - Supabase schema applied on **samplebackdb**.  
-- Live NPÚ `/query` may need user’s network (WAF on some cloud IPs).  
-- Next planned product stages: **5** (tooling/perf suggestions) onward, unless the user prioritizes live sync or deploy prep.
+- Live NPÚ `/query` may need user’s network (WAF on some cloud IPs) — prefer WSL `/home/cursor/dev/genesis`.  
+- **Stage 5 done:** tooling + optimizations → [stage-five-tooling-and-optimizations.md](./stage-five-tooling-and-optimizations.md).  
+- **Stage 6 done (plans only):** [stage-six-final-build-plans.md](./stage-six-final-build-plans.md) — confirmed locks, `main` vs gaps, WP-A–E for build agents, NPÚ/WAF/WSL notes, stage 7–8 deploy handoff, do-not-reopen list.  
+- **Build agents may start only after the user approves** stage 6. Until then: no feature implementation, no Railway deploy, no live NPÚ fill from agents.  
+- After approval → implement WP-A–E from stage 6; then stage 7 (deploy / DB updates / smoke) and stage 8 (eval / monitoring / version hygiene).

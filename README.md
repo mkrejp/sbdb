@@ -34,11 +34,15 @@ uv run ruff check src tests && uv run pytest -q
 ## Documentation
 
 - [Agents instructions](docs/agents-instructions.md) — standing brief for agents working on this repo
+- [Stage 5 — tooling & optimizations](docs/stage-five-tooling-and-optimizations.md) — pipeline/app tooling; Cursor-plan recommendations
+- [Stage 6 — final build-agent plans](docs/stage-six-final-build-plans.md) — WP-A–E; **implement only after user approval** (not deploy yet)
+- [Stage 1–4 build plans](docs/stage-one-architecture-plan.md) — architecture → function/cost → DevOps/QA → [design overview](docs/stage-four-design-overview.md)
 
 ## Design docs
 
-- [Design overview](docs/design-overview.md)
+- [Design overview](docs/design-overview.md) · [Stage 4 design plan](docs/stage-four-design-overview.md)
 - [NPÚ sync practices](docs/npu-geoportal-sync.md)
+- [DNS — sbdb.animarium.ai](docs/dns-sbdb-animarium-ai.md)
 - [Schema SQL](docs/notes-for-data-model.sql) · [Schema JSON](docs/notes-for-data-model.json)
 - [API design](docs/api-design.json)
 
