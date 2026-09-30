@@ -6,8 +6,10 @@ Follows docs/npu-geoportal-sync.md:
 - Request GeoJSON outSR=4326
 - Upsert by NPÚ OBJECTID/id into layer_objects.npu_objectid
 - One DB transaction per page; stream page → upsert
+- HTTP via GNU wget (not httpx) — WAF-friendly from WSL
 - Headers: User-Agent YourSyncBot/1.0, Accept application/json
-- Retry 429/5xx with exponential backoff
+- Retry failed wget fetches with exponential backoff
+  (1 try + 3 retries = 4 attempts per URL)
 
 Usage (prefer user WSL when cloud IPs are WAF-blocked)::
 
@@ -25,16 +27,19 @@ Env:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import subprocess
+import tempfile
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
-import httpx
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -44,9 +49,10 @@ from sample_db_backend.config import get_settings
 logger = logging.getLogger(__name__)
 
 SYNC_USER_AGENT = "YourSyncBot/1.0"
+SYNC_ACCEPT = "application/json"
 SYNC_HEADERS = {
     "User-Agent": SYNC_USER_AGENT,
-    "Accept": "application/json",
+    "Accept": SYNC_ACCEPT,
 }
 
 _SKIP_PROP_KEYS = frozenset(
@@ -65,9 +71,10 @@ _SKIP_PROP_KEYS = frozenset(
 
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 _EPOCH_MS_MIN = 1_000_000_000_000  # ~2001 in ms
-_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
-_MAX_RETRIES = 4
+# Per URL/address: 1 initial attempt + 3 retries = 4 attempts, then abort.
+_MAX_RETRIES = 3
 _BACKOFF_BASE_S = 0.5
+_WGET_BIN = "wget"
 
 
 @dataclass(frozen=True)
@@ -89,6 +96,24 @@ class SyncStats:
     layer_id: str
 
 
+class WgetError(RuntimeError):
+    """Raised when wget exits non-zero or returns unusable content."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        exit_code: int | None = None,
+        url: str | None = None,
+        stderr: str | None = None,
+    ) -> None:
+        """Store wget failure context for logging and retries."""
+        super().__init__(message)
+        self.exit_code = exit_code
+        self.url = url
+        self.stderr = stderr
+
+
 def _normalize_layer_root(url: str) -> str:
     """Strip trailing /query and slash from a layer URL."""
     cleaned = url.strip().rstrip("/")
@@ -97,54 +122,119 @@ def _normalize_layer_root(url: str) -> str:
     return cleaned
 
 
-def _request_with_retries(
-    client: httpx.Client,
-    method: str,
+def _url_with_params(url: str, params: dict[str, str] | None = None) -> str:
+    """Merge query params into ``url`` (params override existing keys)."""
+    if not params:
+        return url
+    parts = urlparse(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.update(params)
+    return urlunparse(parts._replace(query=urlencode(query)))
+
+
+def _build_wget_argv(url: str, output_path: Path, *, timeout_s: float) -> list[str]:
+    """Build wget argv matching Marek's ``wget -O file.json "url"`` pattern.
+
+    Adds User-Agent / Accept headers and ``--tries=1`` so our Python loop owns
+    the 1+3 retry policy.
+    """
+    return [
+        _WGET_BIN,
+        "-O",
+        str(output_path),
+        f"--user-agent={SYNC_USER_AGENT}",
+        f"--header=Accept: {SYNC_ACCEPT}",
+        f"--timeout={max(1, int(timeout_s))}",
+        "--tries=1",
+        "--no-verbose",
+        url,
+    ]
+
+
+def _wget_once(url: str, *, timeout_s: float = 60.0, stem: str = "pamatky") -> bytes:
+    """Run ``wget -O <stem>.json "<url>"`` into a temp dir; return body bytes.
+
+    Raises ``WgetError`` on non-zero exit or empty file. Caller parses JSON.
+    """
+    tmp_dir = Path(tempfile.mkdtemp(prefix="npu-wget-"))
+    tmp_path = tmp_dir / f"{stem}.json"
+    try:
+        argv = _build_wget_argv(url, tmp_path, timeout_s=timeout_s)
+        logger.debug("npu_wget_cmd %s", " ".join(argv))
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        stderr = (completed.stderr or "").strip()
+        if completed.returncode != 0:
+            raise WgetError(
+                f"wget exit {completed.returncode} for {url}",
+                exit_code=completed.returncode,
+                url=url,
+                stderr=stderr or None,
+            )
+        if not tmp_path.exists() or tmp_path.stat().st_size == 0:
+            raise WgetError(
+                f"wget wrote empty body for {url}",
+                exit_code=completed.returncode,
+                url=url,
+                stderr=stderr or None,
+            )
+        return tmp_path.read_bytes()
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+            tmp_dir.rmdir()
+        except OSError:
+            logger.debug("npu_wget_temp_cleanup_failed path=%s", tmp_path)
+
+
+def fetch_json_with_retries(
     url: str,
     *,
     params: dict[str, str] | None = None,
-) -> httpx.Response:
-    """HTTP request with backoff on 429/5xx."""
+    timeout_s: float = 60.0,
+) -> dict[str, Any]:
+    """GET JSON via wget with 1 try + 3 retries (4 attempts) then abort.
+
+    Retries on non-zero wget exit, empty body, or invalid JSON. Exponential
+    backoff between attempts.
+    """
+    full_url = _url_with_params(url, params)
     last_exc: Exception | None = None
     for attempt in range(_MAX_RETRIES + 1):
         try:
-            response = client.request(method, url, params=params, headers=SYNC_HEADERS)
-            if response.status_code in _RETRYABLE_STATUS and attempt < _MAX_RETRIES:
-                wait = _BACKOFF_BASE_S * (2**attempt)
-                logger.warning(
-                    "npu_http_retry status=%s attempt=%s wait_s=%.1f url=%s",
-                    response.status_code,
-                    attempt + 1,
-                    wait,
-                    url,
+            body = _wget_once(full_url, timeout_s=timeout_s)
+            payload = json.loads(body.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise WgetError(
+                    f"Expected JSON object from {full_url}, got {type(payload).__name__}",
+                    url=full_url,
                 )
-                time.sleep(wait)
-                continue
-            response.raise_for_status()
-            return response
-        except httpx.HTTPStatusError:
-            raise
-        except httpx.TransportError as exc:
+            return payload
+        except (WgetError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             last_exc = exc
             if attempt >= _MAX_RETRIES:
                 break
             wait = _BACKOFF_BASE_S * (2**attempt)
             logger.warning(
-                "npu_http_transport_retry attempt=%s wait_s=%.1f error=%s url=%s",
+                "npu_wget_retry attempt=%s wait_s=%.1f error=%s url=%s",
                 attempt + 1,
                 wait,
                 type(exc).__name__,
-                url,
+                full_url,
             )
             time.sleep(wait)
     assert last_exc is not None
     raise last_exc
 
 
-def fetch_layer_metadata(client: httpx.Client, layer_root: str) -> LayerMeta:
-    """GET layer root metadata JSON; require pagination support."""
-    response = _request_with_retries(client, "GET", layer_root, params={"f": "json"})
-    data = response.json()
+def fetch_layer_metadata(layer_root: str, *, timeout_s: float = 60.0) -> LayerMeta:
+    """GET layer root metadata via wget ``?f=json`` (object attributes + paging caps)."""
+    data = fetch_json_with_retries(layer_root, params={"f": "json"}, timeout_s=timeout_s)
     if "error" in data:
         raise RuntimeError(f"Layer metadata error: {data['error']}")
 
@@ -168,12 +258,12 @@ def _page_size(meta: LayerMeta) -> int:
 
 
 def iter_geojson_pages(
-    client: httpx.Client,
     layer_root: str,
     *,
     page_size: int,
+    timeout_s: float = 60.0,
 ) -> Iterator[list[dict[str, Any]]]:
-    """Yield GeoJSON Feature lists using resultOffset / resultRecordCount."""
+    """Yield GeoJSON Feature lists using resultOffset / resultRecordCount via wget."""
     query_url = urljoin(layer_root + "/", "query")
     offset = 0
     while True:
@@ -185,15 +275,14 @@ def iter_geojson_pages(
             "resultOffset": str(offset),
             "resultRecordCount": str(page_size),
         }
-        response = _request_with_retries(client, "GET", query_url, params=params)
-        payload = response.json()
-        if isinstance(payload, dict) and "error" in payload:
+        payload = fetch_json_with_retries(query_url, params=params, timeout_s=timeout_s)
+        if "error" in payload:
             raise RuntimeError(f"Query error at offset {offset}: {payload['error']}")
 
         features: list[dict[str, Any]]
-        if isinstance(payload, dict) and payload.get("type") == "FeatureCollection":
+        if payload.get("type") == "FeatureCollection":
             features = list(payload.get("features") or [])
-        elif isinstance(payload, dict) and "features" in payload:
+        elif "features" in payload:
             features = list(payload.get("features") or [])
         else:
             raise RuntimeError(f"Unexpected query payload type at offset {offset}")
@@ -425,67 +514,66 @@ def sync_layer(
     temporal_fields: set[str] | None = None,
     timeout_s: float = 60.0,
 ) -> SyncStats:
-    """Fetch NPÚ layer pages and upsert into Postgres (one txn per page)."""
+    """Fetch NPÚ layer pages via wget and upsert into Postgres (one txn per page)."""
     layer_root = _normalize_layer_root(layer_url)
     source_key = f"npu:{layer_root}"
     tags = tag_fields or set()
     urls = url_fields or set()
     temporals = temporal_fields or set()
 
-    with httpx.Client(timeout=timeout_s, follow_redirects=True, headers=SYNC_HEADERS) as client:
-        meta = fetch_layer_metadata(client, layer_root)
-        page_size = _page_size(meta)
-        display_name = layer_name or meta.name
-        logger.info(
-            "npu_sync_start layer=%s maxRecordCount=%s page_size=%s supportsPagination=%s",
-            layer_root,
-            meta.max_record_count,
-            page_size,
-            meta.supports_pagination,
+    meta = fetch_layer_metadata(layer_root, timeout_s=timeout_s)
+    page_size = _page_size(meta)
+    display_name = layer_name or meta.name
+    logger.info(
+        "npu_sync_start layer=%s maxRecordCount=%s page_size=%s supportsPagination=%s",
+        layer_root,
+        meta.max_record_count,
+        page_size,
+        meta.supports_pagination,
+    )
+
+    pages = 0
+    features_total = 0
+    upserted = 0
+    with psycopg.connect(database_url, row_factory=dict_row) as conn:
+        layer_id = ensure_layer(
+            conn,
+            source_key=source_key,
+            source_url=layer_root,
+            name=display_name,
+            description=f"Mirrored from NPÚ Geoportal: {layer_root}",
         )
+        conn.commit()
 
-        pages = 0
-        features_total = 0
-        upserted = 0
-        with psycopg.connect(database_url, row_factory=dict_row) as conn:
-            layer_id = ensure_layer(
-                conn,
-                source_key=source_key,
-                source_url=layer_root,
-                name=display_name,
-                description=f"Mirrored from NPÚ Geoportal: {layer_root}",
-            )
-            conn.commit()
-
-            for page in iter_geojson_pages(client, layer_root, page_size=page_size):
-                pages += 1
-                features_total += len(page)
-                try:
-                    for feature in page:
-                        if upsert_feature(
-                            conn,
-                            layer_id=layer_id,
-                            feature=feature,
-                            tag_fields=tags,
-                            url_fields=urls,
-                            temporal_fields=temporals,
-                        ):
-                            upserted += 1
-                    conn.commit()
-                    logger.info(
-                        "npu_sync_page pages=%s features=%s upserted_total=%s",
-                        pages,
-                        len(page),
-                        upserted,
-                    )
-                except Exception:
-                    conn.rollback()
-                    logger.exception(
-                        "npu_sync_page_failed pages=%s features=%s",
-                        pages,
-                        len(page),
-                    )
-                    raise
+        for page in iter_geojson_pages(layer_root, page_size=page_size, timeout_s=timeout_s):
+            pages += 1
+            features_total += len(page)
+            try:
+                for feature in page:
+                    if upsert_feature(
+                        conn,
+                        layer_id=layer_id,
+                        feature=feature,
+                        tag_fields=tags,
+                        url_fields=urls,
+                        temporal_fields=temporals,
+                    ):
+                        upserted += 1
+                conn.commit()
+                logger.info(
+                    "npu_sync_page pages=%s features=%s upserted_total=%s",
+                    pages,
+                    len(page),
+                    upserted,
+                )
+            except Exception:
+                conn.rollback()
+                logger.exception(
+                    "npu_sync_page_failed pages=%s features=%s",
+                    pages,
+                    len(page),
+                )
+                raise
 
     return SyncStats(
         pages=pages,

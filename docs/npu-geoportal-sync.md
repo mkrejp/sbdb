@@ -14,12 +14,26 @@ Portal entry: [npu.cz](https://npu.cz) · REST directory: [geoportal.npu.cz/arcg
 | Pagination | `supportsPagination: true` |
 | Sync CLI | `uv run sample-db-npu-sync` (requires `DATABASE_URL`) |
 
-Example query (user-provided):
+HTTP client: **GNU wget** (`wget -O <file.json> "<url>"`), not httpx. The portal
+entry `https://npu.cz` is not the object-list JSON; the sync uses the MapServer
+layer / query URLs below (Marek’s `-O` pattern, locked layer for data).
 
-```http
-GET https://geoportal.npu.cz/arcgis/rest/services/Tematicke/CP_UAP_PVO/MapServer/0/query?where=1%3D1&outFields=*&resultRecordCount=5&outSR=4326&f=geojson
-User-Agent: YourSyncBot/1.0
-Accept: application/json
+Example metadata fetch (object attributes / paging caps):
+
+```bash
+wget -O pamatky.json \
+  --user-agent=YourSyncBot/1.0 \
+  --header='Accept: application/json' \
+  'https://geoportal.npu.cz/arcgis/rest/services/Tematicke/CP_UAP_PVO/MapServer/0?f=json'
+```
+
+Example query (paged GeoJSON features):
+
+```bash
+wget -O pamatky-page.json \
+  --user-agent=YourSyncBot/1.0 \
+  --header='Accept: application/json' \
+  'https://geoportal.npu.cz/arcgis/rest/services/Tematicke/CP_UAP_PVO/MapServer/0/query?where=1%3D1&outFields=*&resultRecordCount=5&outSR=4326&f=geojson'
 ```
 
 `NPU_LAYER_URL` must be this concrete MapServer **layer root** (`…/MapServer/<id>`), not only `https://npu.cz`.
@@ -32,12 +46,12 @@ Accept: application/json
 
 ## Step 1 — Layer rules
 
-Before pulling, read the **MapServer layer root** metadata JSON (`…/MapServer/<id>?f=pjson`) and note:
+Before pulling, `wget -O` the **MapServer layer root** metadata JSON (`…/MapServer/<id>?f=json`) and note:
 
 - `maxRecordCount`
 - `supportsPagination: true` (often under `advancedQueryCapabilities`)
 
-Configure the client cap **at or below** that max (e.g. 1000). Send `User-Agent: YourSyncBot/1.0` and `Accept: application/json`.
+Configure the client cap **at or below** that max (e.g. 1000). wget sends `User-Agent: YourSyncBot/1.0` and `Accept: application/json`.
 
 ## Step 2 — Paged fetch (blueprint)
 
@@ -79,7 +93,9 @@ Config / `.env.example` defaults match the CP_UAP_PVO mapping above:
 | `NPU_URL_FIELDS` | `urlExt,urlInt` |
 | `NPU_TEMPORAL_FIELDS` | `platn_od,platn_do,aktual,datumStavuOchrany` |
 
-CLI headers: `User-Agent: YourSyncBot/1.0`, `Accept: application/json`. Retries with backoff on HTTP 429/5xx.
+CLI uses **wget** (`-O` temp `pamatky.json`, then parse). Headers:
+`User-Agent: YourSyncBot/1.0`, `Accept: application/json`. Retries: **1 try + 3
+retries (= 4 attempts)** per URL on non-zero wget exit / bad JSON, then abort.
 
 ## Where to run live sync
 

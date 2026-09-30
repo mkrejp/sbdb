@@ -1,21 +1,30 @@
-"""Unit tests for NPÚ Geoportal sync helpers (no live network / DB)."""
+"""Unit tests for NPÚ Geoportal sync helpers (mocked wget; no live network / DB)."""
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qs, urlparse
 
-import httpx
 import pytest
 
 from sample_db_backend.sync.npu_geoportal import (
+    SYNC_ACCEPT,
     SYNC_HEADERS,
     SYNC_USER_AGENT,
-    _request_with_retries,
+    WgetError,
+    _build_wget_argv,
     classify_attribute,
     extract_npu_objectid,
+    fetch_json_with_retries,
     fetch_layer_metadata,
     iter_geojson_pages,
 )
+
+if TYPE_CHECKING:
+    from _pytest.monkeypatch import MonkeyPatch
 
 
 def test_extract_npu_objectid_prefers_objectid() -> None:
@@ -97,24 +106,83 @@ def test_sync_headers_identify_bot() -> None:
     assert SYNC_USER_AGENT == "YourSyncBot/1.0"
     assert SYNC_HEADERS["User-Agent"] == "YourSyncBot/1.0"
     assert SYNC_HEADERS["Accept"] == "application/json"
+    assert SYNC_ACCEPT == "application/json"
 
 
-def test_fetch_metadata_and_pagination() -> None:
-    """Metadata read + offset paging stops on short page."""
+def test_build_wget_argv_uses_dash_o() -> None:
+    """wget argv follows ``wget -O file.json url`` with UA + Accept."""
+    out = Path("/tmp/pamatky.json")
+    argv = _build_wget_argv("https://example.test/MapServer/0?f=json", out, timeout_s=60.0)
+    assert argv[0] == "wget"
+    assert argv[1] == "-O"
+    assert argv[2] == str(out)
+    assert f"--user-agent={SYNC_USER_AGENT}" in argv
+    assert f"--header=Accept: {SYNC_ACCEPT}" in argv
+    assert "--tries=1" in argv
+    assert argv[-1] == "https://example.test/MapServer/0?f=json"
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        assert request.headers.get("User-Agent") == SYNC_USER_AGENT
-        if path.endswith("/0"):
-            return httpx.Response(
-                200,
-                json={
-                    "name": "TestLayer",
-                    "maxRecordCount": 2,
-                    "advancedQueryCapabilities": {"supportsPagination": True},
-                },
-            )
-        offset = int(request.url.params.get("resultOffset", "0"))
+
+def _install_wget_mock(
+    monkeypatch: MonkeyPatch,
+    handler: Any,
+) -> list[list[str]]:
+    """Patch subprocess.run to simulate ``wget -O <file> <url>`` writing JSON.
+
+    ``handler(url)`` returns a JSON-serializable dict (success) or raises
+    ``WgetError`` / returns an int exit code via a ``("exit", code)`` tuple.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(
+        argv: list[str],
+        *,
+        capture_output: bool = False,
+        text: bool = False,
+        check: bool = False,
+    ) -> Any:
+        del capture_output, text, check
+        calls.append(list(argv))
+        assert argv[0] == "wget"
+        assert argv[1] == "-O"
+        out_path = Path(argv[2])
+        url = argv[-1]
+        result = handler(url)
+        if isinstance(result, tuple) and result and result[0] == "exit":
+            return type(
+                "Completed",
+                (),
+                {"returncode": int(result[1]), "stderr": "mock wget fail", "stdout": ""},
+            )()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(result), encoding="utf-8")
+        return type(
+            "Completed",
+            (),
+            {"returncode": 0, "stderr": "", "stdout": ""},
+        )()
+
+    monkeypatch.setattr(
+        "sample_db_backend.sync.npu_geoportal.subprocess.run",
+        fake_run,
+    )
+    return calls
+
+
+def test_fetch_metadata_and_pagination(monkeypatch: MonkeyPatch) -> None:
+    """Metadata ``?f=json`` + offset paging stops on short page (mocked wget)."""
+
+    def handler(url: str) -> dict[str, Any]:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        path = parsed.path.rstrip("/")
+        if path.endswith("/0") and not path.endswith("/query"):
+            assert qs.get("f") == ["json"]
+            return {
+                "name": "TestLayer",
+                "maxRecordCount": 2,
+                "advancedQueryCapabilities": {"supportsPagination": True},
+            }
+        offset = int((qs.get("resultOffset") or ["0"])[0])
         if offset == 0:
             features = [
                 {
@@ -138,30 +206,27 @@ def test_fetch_metadata_and_pagination() -> None:
             ]
         else:
             features = []
-        return httpx.Response(
-            200,
-            json={"type": "FeatureCollection", "features": features},
-        )
+        return {"type": "FeatureCollection", "features": features}
 
-    transport = httpx.MockTransport(handler)
-    with httpx.Client(transport=transport) as client:
-        meta = fetch_layer_metadata(client, "https://example.test/MapServer/0")
-        assert meta.max_record_count == 2
-        assert meta.supports_pagination is True
-        pages = list(
-            iter_geojson_pages(
-                client,
-                "https://example.test/MapServer/0",
-                page_size=2,
-            )
+    calls = _install_wget_mock(monkeypatch, handler)
+    meta = fetch_layer_metadata("https://example.test/MapServer/0")
+    assert meta.max_record_count == 2
+    assert meta.supports_pagination is True
+    pages = list(
+        iter_geojson_pages(
+            "https://example.test/MapServer/0",
+            page_size=2,
         )
+    )
     assert len(pages) == 2
     assert len(pages[0]) == 2
     assert len(pages[1]) == 1
+    assert all(c[1] == "-O" for c in calls)
+    assert any(c[-1].endswith("?f=json") or "f=json" in c[-1] for c in calls)
 
 
-def test_request_retries_on_429(monkeypatch: pytest.MonkeyPatch) -> None:
-    """429 responses are retried with backoff then succeed."""
+def test_wget_retries_then_succeeds(monkeypatch: MonkeyPatch) -> None:
+    """Non-zero wget exits are retried (1+3) with backoff then succeed."""
     sleeps: list[float] = []
     monkeypatch.setattr(
         "sample_db_backend.sync.npu_geoportal.time.sleep",
@@ -169,18 +234,37 @@ def test_request_retries_on_429(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     calls = {"n": 0}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(url: str) -> Any:
+        del url
         calls["n"] += 1
         if calls["n"] < 3:
-            return httpx.Response(429, json={"error": "rate"})
-        return httpx.Response(200, json={"ok": True})
+            return ("exit", 8)
+        return {"ok": True}
 
-    transport = httpx.MockTransport(handler)
-    with httpx.Client(transport=transport) as client:
-        response = _request_with_retries(client, "GET", "https://example.test/x")
-    assert response.status_code == 200
+    _install_wget_mock(monkeypatch, handler)
+    payload = fetch_json_with_retries("https://example.test/x")
+    assert payload == {"ok": True}
     assert calls["n"] == 3
     assert len(sleeps) == 2
+
+
+def test_wget_retries_exhausted(monkeypatch: MonkeyPatch) -> None:
+    """After 4 failed attempts the last WgetError is raised."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        "sample_db_backend.sync.npu_geoportal.time.sleep",
+        lambda s: sleeps.append(s),
+    )
+
+    def handler(url: str) -> Any:
+        del url
+        return ("exit", 8)
+
+    _install_wget_mock(monkeypatch, handler)
+    with pytest.raises(WgetError) as excinfo:
+        fetch_json_with_retries("https://example.test/fail")
+    assert excinfo.value.exit_code == 8
+    assert len(sleeps) == 3  # retries after attempts 1–3; 4th fails without sleep
 
 
 def test_config_defaults_match_cp_uap_pvo() -> None:
