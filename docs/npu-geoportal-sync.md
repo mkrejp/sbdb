@@ -1,47 +1,72 @@
 # NPÚ Geoportal REST — mirror & sync practices
 
-Initial data fill for map layers comes from the **NPÚ Geoportal REST Services** (ArcGIS). Account for server-side request limits.
+Initial data fill for map layers comes from the **NPÚ Geoportal REST Services** (ArcGIS). NPÚ primarily publishes via **MapServer** (read-only query), not editable FeatureServer. MapServer layers expose the same query operations used here (`f=geojson`, pagination, etc.).
+
+Portal entry: [npu.cz](https://npu.cz) · REST directory: [geoportal.npu.cz/arcgis/rest/services](https://geoportal.npu.cz/arcgis/rest/services)
+
+## Locked layer (`NPU_LAYER_URL`)
+
+| Item | Value |
+| --- | --- |
+| Layer root | `https://geoportal.npu.cz/arcgis/rest/services/Tematicke/CP_UAP_PVO/MapServer/0` |
+| Name | Národní kulturní památky (Feature Layer, polygons) |
+| `maxRecordCount` | 2000 |
+| Pagination | `supportsPagination: true` |
+| Sync CLI | `uv run sample-db-npu-sync` (requires `DATABASE_URL`) |
+
+Example query (user-provided):
+
+```http
+GET https://geoportal.npu.cz/arcgis/rest/services/Tematicke/CP_UAP_PVO/MapServer/0/query?where=1%3D1&outFields=*&resultRecordCount=5&outSR=4326&f=geojson
+User-Agent: YourSyncBot/1.0
+Accept: application/json
+```
+
+`NPU_LAYER_URL` must be this concrete MapServer **layer root** (`…/MapServer/<id>`), not only `https://npu.cz`.
 
 ## Limits
 
-- Server enforces `maxRecordCount` (often **1,000–2,000** objects per call).
+- Server enforces `maxRecordCount` (this layer: **2000**).
 - `where=1=1` on a large layer **truncates without warning** if you do not page.
-- Reliable sync: **paged architecture** via `resultOffset` / `resultRecordCount`, or a spatial envelope strategy.
+- Reliable sync: **paged architecture** via `resultOffset` / `resultRecordCount`.
 
 ## Step 1 — Layer rules
 
-Before pulling, read the **layer endpoint root** (service/layer metadata JSON) and note:
+Before pulling, read the **MapServer layer root** metadata JSON (`…/MapServer/<id>?f=pjson`) and note:
 
 - `maxRecordCount`
-- `supportsPagination: true`
+- `supportsPagination: true` (often under `advancedQueryCapabilities`)
 
-Configure the client cap **at or below** that max (e.g. 1000).
-
-Metadata / portal entry: [npu.cz](https://npu.cz) — use the concrete ArcGIS FeatureServer/MapServer **layer query URL** for the chosen layer (not only the site root).
+Configure the client cap **at or below** that max (e.g. 1000). Send `User-Agent: YourSyncBot/1.0` and `Accept: application/json`.
 
 ## Step 2 — Paged fetch (blueprint)
 
 1. Optional: `returnCountOnly=true` to learn total scope.
 2. Loop: `where=1=1`, `outFields=*`, `outSR=4326`, `f=geojson`, `resultOffset`, `resultRecordCount=MAX`.
-3. Append features; advance offset by `len(features)`; stop when a page returns fewer than `MAX` (or empty).
-4. Build a FeatureCollection (WGS84 / CRS84) and/or stream into Postgres.
+3. Advance offset by `len(features)`; stop when a page returns fewer than `MAX` (or empty).
+4. Stream into Postgres (do not hold huge layers entirely in memory).
 
-Identity: prefer `properties.OBJECTID` or `properties.id` as the **stable external key** for upserts.
+Identity: prefer `properties.OBJECTID` (this layer) as the **stable external key** for upserts.
 
-## Step 3 — Long-term sync into Postgres/PostGIS
+## Step 3 — Long-term sync into Postgres
 
 | Phase | Strategy | Method |
 | --- | --- | --- |
-| Primary keys | Identity binding | Use NPÚ `OBJECTID`/`id` as the sync key (unique constraint). Do not rely only on arbitrary serials for deduping sync cycles. |
-| SQL storage | Upsert | `INSERT … ON CONFLICT (npu_objectid) DO UPDATE …` |
-| Geometry | Spatial transform | `ST_GeomFromGeoJSON` (or equivalent) into geometry/geography |
-| Automation | Schedule | Weekly/monthly is enough for infrequently changing heritage boundaries; wire later via CI/cron/agent (stage 3/7) |
+| Primary keys | Identity binding | NPÚ `OBJECTID` → `layer_objects.npu_objectid` |
+| SQL storage | Upsert | `INSERT … ON CONFLICT (layer_id, npu_objectid) DO UPDATE …` |
+| Geometry | JSONB GeoJSON | This project; PostGIS `ST_GeomFromGeoJSON` optional later |
+| Automation | Schedule | Weekly/monthly later (stage 7) |
 
-## Project mapping
+## Project mapping (CP_UAP_PVO)
 
-- One NPÚ layer → one (or more) app **layers** rows + **layer objects** with GeoJSON geometry.
-- Thematic attributes → typed **properties** and/or mapped columns as designed.
-- Classification → **tags** where mappable from NPÚ fields.
-- External links → object **URL list** when present in attributes or constructed from known NPÚ patterns.
+| NPÚ | App |
+| --- | --- |
+| Layer root + name | `map_layers` |
+| Feature geometry | `layer_objects.geometry` (JSONB) |
+| `OBJECTID` | `layer_objects.npu_objectid` |
+| `Subtyp`, `typOchranyKod`, `typOchranyNazev`, `fazeOchranyKod`, `fazeOchranyNazev`, `PrStavNazev` | `tags` / `layer_object_tags` |
+| `urlExt`, `urlInt` | `layer_object_urls` |
+| `platn_od`, `platn_do`, `aktual`, `datumStavuOchrany` | `layer_object_properties` (`temporal`) |
+| Other scalars (e.g. `nazev` / display fields) | `layer_object_properties` (`text`) |
 
-Free tier: batch upserts; avoid loading entire huge layers into memory if a layer is very large — stream page → upsert when needed.
+Free tier: page → upsert; skip full mirror from blocked egress environments — run sync from a network that can reach `geoportal.npu.cz`.
