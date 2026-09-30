@@ -39,18 +39,14 @@ Let `LAYER` = `$NPU_LAYER_URL` (layer root, no trailing `/query`).
 ### 0) Metadata (paging caps + name)
 
 ```bash
-wget -O meta.json \
-  --user-agent=YourSyncBot/1.0 \
-  --header='Accept: application/json' \
+wget -O meta.json --timeout=60 --tries=1 \
   "${LAYER}?f=json"
 ```
 
 ### 1) Object **list** page → `pamatky.json`
 
 ```bash
-wget -O pamatky.json \
-  --user-agent=YourSyncBot/1.0 \
-  --header='Accept: application/json' \
+wget -O pamatky.json --timeout=60 --tries=1 \
   "${LAYER}/query?where=1%3D1&returnIdsOnly=true&returnGeometry=false&resultOffset=0&resultRecordCount=1000&f=json"
 ```
 
@@ -59,9 +55,7 @@ Response shape: `{"objectIdFieldName":"OBJECTID","objectIds":[…]}`. Advance `r
 ### 2) Per-object (or small-batch) **detail**
 
 ```bash
-wget -O detail.json \
-  --user-agent=YourSyncBot/1.0 \
-  --header='Accept: application/json' \
+wget -O detail.json --timeout=60 --tries=1 \
   "${LAYER}/query?objectIds=101,102&outFields=*&outSR=4326&returnGeometry=true&f=geojson"
 ```
 
@@ -83,7 +77,7 @@ Upsert key: NPÚ `OBJECTID` → `layer_objects.npu_objectid` (per-page/detail-fi
 
 ## Step 1 — Layer rules
 
-Before pulling, wget the **MapServer layer root** metadata (`…/MapServer/<id>?f=json`) and note `maxRecordCount` / `supportsPagination`. wget sends `User-Agent: YourSyncBot/1.0` and `Accept: application/json`.
+Before pulling, wget the **MapServer layer root** metadata (`…/MapServer/<id>?f=json`) and note `maxRecordCount` / `supportsPagination`. Orchestrator wget uses **only** `-O`, `--timeout`, `--tries=1` (URL last); bash owns outer retries via `NPU_MAX_RETRIES`.
 
 ## Step 2 — List → detail → insert (blueprint)
 
@@ -110,7 +104,7 @@ Before pulling, wget the **MapServer layer root** metadata (`…/MapServer/<id>?
 | `OBJECTID` | `layer_objects.npu_objectid` |
 | `Subtyp`, `typOchranyKod`, `typOchranyNazev`, `fazeOchranyKod`, `fazeOchranyNazev`, `PrStavNazev` | `tags` / `layer_object_tags` |
 | `urlExt`, `urlInt` | `layer_object_urls` |
-| `platn_od`, `platn_do`, `aktual`, `datumStavuOchrany` | `layer_object_properties` (`temporal`) |
+| `platn_od`, `platn_do`, `aktual`, `datumStavuOchrany` | `layer_object_properties` (`temporal`) — year ∈ `[1000, now+5]`, UTC; unparseable → `text` |
 | Other scalars (e.g. `nazev`) | `layer_object_properties` (`text`) |
 
 ## Field-config defaults (`NPU_*`)

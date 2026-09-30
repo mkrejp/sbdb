@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -61,7 +62,11 @@ _SKIP_PROP_KEYS = frozenset(
 )
 
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
-_EPOCH_MS_MIN = 1_000_000_000_000  # ~2001 in ms
+_DIGIT_EPOCH_RE = re.compile(r"^-?\d+(\.\d+)?$")
+_EPOCH_MS_MIN = 1_000_000_000_000  # ~2001-09-09 in ms (ArcGIS date unit)
+_EPOCH_S_MIN = 1_000_000_000  # ~2001-09-09 in seconds (legacy heuristic)
+_TEMPORAL_YEAR_MIN = 1000
+_TEMPORAL_YEAR_MAX_AHEAD = 5
 _CLIENT_PAGE_CAP = 1000
 
 
@@ -177,25 +182,76 @@ def _is_skip_key(key: str) -> bool:
     return key.lower() in _SKIP_PROP_KEYS or key.lower().startswith("shape_")
 
 
+def _is_dateish_key(key: str) -> bool:
+    """True when the attribute name looks like a date/time field."""
+    lower = key.lower()
+    return any(tok in lower for tok in ("date", "datum", "time", "platn", "aktual"))
+
+
+def _as_aware_utc(dt: datetime) -> datetime:
+    """Normalize to timezone-aware UTC (naive ISO treated as UTC)."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _within_calendar_window(dt: datetime) -> bool:
+    """Reject absurd years outside the heritage-safe window."""
+    max_year = datetime.now(tz=UTC).year + _TEMPORAL_YEAR_MAX_AHEAD
+    return _TEMPORAL_YEAR_MIN <= dt.year <= max_year
+
+
+def _datetime_from_epoch_number(num: float) -> datetime | None:
+    """Convert a numeric epoch to aware UTC, preferring ArcGIS milliseconds."""
+    if not math.isfinite(num) or num <= 0:
+        return None
+    try:
+        if num >= _EPOCH_MS_MIN:
+            dt = datetime.fromtimestamp(num / 1000.0, tz=UTC)
+        elif num >= _EPOCH_S_MIN:
+            # Legacy seconds heuristic (values in ~[1e9, 1e12))
+            dt = datetime.fromtimestamp(num, tz=UTC)
+        else:
+            return None
+    except (OverflowError, OSError, ValueError):
+        return None
+    if not _within_calendar_window(dt):
+        logger.warning("temporal_out_of_range epoch=%s year=%s", num, dt.year)
+        return None
+    return dt
+
+
 def _parse_temporal(value: Any) -> datetime | None:
-    """Parse ArcGIS epoch-ms or ISO-ish strings into aware datetimes."""
+    """Parse ArcGIS epoch-ms or ISO-ish strings into aware UTC datetimes.
+
+    Sanity checks:
+    - reject empty / NaN / inf / zero / negative
+    - prefer epoch **milliseconds** (``>= 1e12``); seconds only in ``[1e9, 1e12)``
+    - digit strings (len >= 10) go through the epoch path
+    - calendar year must be in ``[1000, now.year + 5]``
+    - ISO without offset is treated as UTC
+    """
     if value is None or value == "":
         return None
-    if isinstance(value, (int, float)):
-        num = float(value)
-        if num >= _EPOCH_MS_MIN:
-            return datetime.fromtimestamp(num / 1000.0, tz=UTC)
-        if num > 1_000_000_000:  # seconds
-            return datetime.fromtimestamp(num, tz=UTC)
+    if isinstance(value, bool):
         return None
+    if isinstance(value, (int, float)):
+        return _datetime_from_epoch_number(float(value))
     if isinstance(value, str):
         text = value.strip()
         if not text:
             return None
+        if _DIGIT_EPOCH_RE.fullmatch(text):
+            return _datetime_from_epoch_number(float(text))
         try:
-            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
         except ValueError:
             return None
+        dt = _as_aware_utc(dt)
+        if not _within_calendar_window(dt):
+            logger.warning("temporal_out_of_range iso=%r year=%s", text, dt.year)
+            return None
+        return dt
     return None
 
 
@@ -218,25 +274,31 @@ def classify_attribute(
     """Map one NPÚ attribute into (kind, payload).
 
     kind ∈ {tag, url, temporal, text}; returns None to skip.
+
+    Temporal values are accepted only for configured ``temporal_fields`` or
+    dateish attribute names (``date`` / ``datum`` / ``time`` / ``platn`` /
+    ``aktual``). Bare large integers on unrelated keys stay ``text``.
     """
     if value is None or value == "" or _is_skip_key(key):
         return None
     temporal_fields = temporal_fields or set()
-    lower = key.lower()
     if _field_match(key, tag_fields):
         return ("tag", str(value).strip())
     if _field_match(key, url_fields):
         return ("url", str(value).strip())
     if isinstance(value, str) and _URL_RE.match(value.strip()):
         return ("url", value.strip())
-    temporal = _parse_temporal(value)
-    if _field_match(key, temporal_fields):
+
+    configured_temporal = _field_match(key, temporal_fields)
+    dateish = _is_dateish_key(key)
+    if configured_temporal or dateish:
+        temporal = _parse_temporal(value)
         if temporal is not None:
             return ("temporal", temporal)
-        return ("text", str(value))
-    dateish = "date" in lower or "datum" in lower or "time" in lower
-    if temporal is not None and (dateish or isinstance(value, (int, float))):
-        return ("temporal", temporal)
+        if configured_temporal:
+            logger.debug("temporal_fallback_text key=%s value=%r", key, value)
+            return ("text", str(value))
+
     if isinstance(value, (dict, list)):
         return ("text", str(value))
     return ("text", str(value))

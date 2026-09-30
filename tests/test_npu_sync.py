@@ -71,6 +71,47 @@ def test_classify_attribute_routes() -> None:
         "Karlštejn",
     )
     assert classify_attribute("OBJECTID", 1, tag_fields=set(), url_fields=set()) is None
+    # Large int on a non-dateish key must stay text (no bare-number → temporal)
+    assert classify_attribute(
+        "KOD",
+        1_700_000_000_000,
+        tag_fields=set(),
+        url_fields=set(),
+    ) == ("text", "1700000000000")
+
+
+def test_parse_temporal_sanity() -> None:
+    """Timestamp parser rejects sentinels and out-of-window values."""
+    from sample_db_backend.sync.npu_geoportal import _parse_temporal
+
+    assert _parse_temporal(None) is None
+    assert _parse_temporal(0) is None
+    assert _parse_temporal(-1) is None
+    assert _parse_temporal(float("nan")) is None
+    # ms happy path
+    ms = _parse_temporal(1_700_000_000_000)
+    assert ms is not None and ms.tzinfo == UTC
+    # digit string epoch-ms
+    assert _parse_temporal("1700000000000") is not None
+    # seconds heuristic
+    sec = _parse_temporal(1_700_000_000)
+    assert sec is not None and sec.tzinfo == UTC
+    # ISO with Z
+    iso = _parse_temporal("2023-11-14T12:00:00Z")
+    assert iso is not None and iso.tzinfo == UTC
+    # naive ISO → UTC
+    naive = _parse_temporal("2023-11-14T12:00:00")
+    assert naive is not None and naive.tzinfo == UTC
+    # far-future rejected
+    assert _parse_temporal("9999-01-01T00:00:00Z") is None
+    # unparseable configured field → text via classify
+    assert classify_attribute(
+        "platn_od",
+        "not-a-date",
+        tag_fields=set(),
+        url_fields=set(),
+        temporal_fields={"platn_od"},
+    ) == ("text", "not-a-date")
 
 
 def test_classify_cp_uap_pvo_defaults() -> None:
@@ -107,7 +148,7 @@ def test_classify_cp_uap_pvo_defaults() -> None:
 
 
 def test_sync_headers_identify_bot() -> None:
-    """Documented bot identity for wget User-Agent / Accept."""
+    """Documented bot identity constants (wget itself uses only -O/timeout/tries)."""
     assert SYNC_USER_AGENT == "YourSyncBot/1.0"
     assert SYNC_HEADERS["User-Agent"] == "YourSyncBot/1.0"
     assert SYNC_HEADERS["Accept"] == "application/json"
