@@ -70,10 +70,10 @@ Current advertised version: **0.1.0** (`pyproject.toml` + FastAPI `info.version`
 
 ## E. Exit criteria → Stage 9
 
-- [ ] Smoke A green on current mirrored SHA  
-- [ ] Monitoring B notes recorded (no paid add-ons)  
-- [ ] Version/changelog PR merged (or explicitly deferred by Marek)  
-- [ ] Mirrored tip serves matching `info.version`  
+- [x] Smoke A green on current mirrored SHA (`b42d1c2`)  
+- [x] Monitoring B notes recorded (no paid add-ons)  
+- [ ] Version/changelog PR merged (or explicitly deferred by Marek) — draft [#15](https://cursor.com/codebase/marek-k-ejpsk/genesis/pull/15)  
+- [ ] Mirrored tip serves matching `info.version` (still `0.1.0` until 0.2.0 mirrored)  
 - [ ] Handoff: Stage 9 billing / cost watch  
 
 ## Status snapshot (2026-09-30)
@@ -84,5 +84,6 @@ Current advertised version: **0.1.0** (`pyproject.toml` + FastAPI `info.version`
 | Railway | Deploy `7304b0dc…` **SUCCESS** · commit `b42d1c2` · **sbdb-api** production |
 | Health / smoke | `GET /health` **200** ok/connected; layers/objects **200**; NPÚ columns + Polygon geom present; light create/422/delete/404 OK |
 | Free-tier metrics | ~1h: CPU avg ~0.2%; RAM avg ~0.10 GB / max ~0.27 GB (under 0.5 GB Free) |
-| Version PR | **0.2.0** changelog + version bump (this PR) |
+| Supabase advisors | INFO: RLS on 6 tables with no policies (expected for service-role API); WARN: `set_updated_at` mutable `search_path`; unused indexes INFO only — no paid APM |
+| Version PR | Draft Origin PR: bump **0.2.0** + CHANGELOG + Stage 8 doc |
 | Marek still | Merge version PR when CI green; mirror again so OpenAPI `info.version` becomes `0.2.0` |
