@@ -2,8 +2,21 @@
 
 Reference for any agent working on this repository. Prefer this file plus `docs/` over chat history.
 
-**Repo:** [marek-k-ejpsk/genesis](https://cursor.com/codebase/marek-k-ejpsk/genesis)  
+**Dev repo (Origin):** [marek-k-ejpsk/genesis](https://cursor.com/codebase/marek-k-ejpsk/genesis)  
+**Release mirror (GitHub):** [mkrejp/sbdb](https://github.com/mkrejp/sbdb) — environment **release** holds tested code mirrored from Origin  
+**Host:** Railway project **zesty-adaptation**, service **sbdb-api** (deploys from GitHub `mkrejp/sbdb`, not Origin directly)  
 **Project store (Context):** also mirrors plans under the Sample DB backend Project store.
+
+### Repo roles (locked)
+
+| Role | Location | Notes |
+| --- | --- | --- |
+| Development / PRs | Origin `marek-k-ejpsk/genesis` | Primary working tree; Cursor/Origin PRs land here first |
+| Tested release mirror | GitHub `mkrejp/sbdb` · env **release** | Mirror **tested** Origin `main` (or release tag) here for deploy |
+| Production deploy | Railway **zesty-adaptation** / **sbdb-api** | Build from `mkrejp/sbdb` `main` (or release branch); shared vars `DATABASE_URL`, `LOG_LEVEL`, `PUBLIC_HOSTNAME` |
+| Local WSL | `/home/cursor/dev/genesis` | Prefer for NPÚ sync (cloud IPs often WAF-blocked) |
+
+**Mirror rule:** do not treat empty `mkrejp/sbdb` as source of truth. After Origin merges are approved/tested → push/mirror to GitHub → Railway redeploys. Ask immediately if GitHub write auth / PAT is missing.
 
 ---
 
@@ -23,7 +36,7 @@ Build a **sample DB backend** in stages: plan first, then framework and design d
 | **4** | Initial repo framework + design-plan docs (Markdown + SQL/JSON) |
 | **5** | Evaluate tooling (plugins/addons/extensions) for pipeline and app; suggest delivery-pipeline and performance optimizations |
 | **6** | Rethink stages 1–5; create **final plans for build agents** to implement the app |
-| **7** | Deploy; DB data updates; deployment agents put release online and start testing |
+| **7** | **Build** application (Docker/image from GitHub release mirror); deploy; DB data updates; deployment agents put release online and start testing |
 | **8** | Test/evaluate deployed app; monitoring setup changes; version numbering, changelog, PR version promotion |
 | **9** | Watch billing; cost-of-running estimates; financial optimization (tokens + hosting) |
 
@@ -35,9 +48,9 @@ Build a **sample DB backend** in stages: plan first, then framework and design d
 
 - **App:** Python + FastAPI  
 - **DB:** PostgreSQL via **Supabase** project **samplebackdb** (`bsauzwsgiwghkwgehcid`, `eu-central-2`, Free)  
-- **CI:** GitHub Actions  
-- **Host:** Railway (free/trial preferred; Hobby only as escape hatch)  
-- **Public hostname:** `sbdb.animarium.ai` → Railway (see `docs` / Context DNS notes)  
+- **CI:** GitHub Actions (on Origin/GitHub as wired; deploy CI path uses `mkrejp/sbdb`)  
+- **Host:** Railway **zesty-adaptation** / **sbdb-api** (Trial/Free; Hobby only as escape hatch) — source **GitHub `mkrejp/sbdb`**  
+- **Public hostname:** `sbdb.animarium.ai` → Railway (see DNS notes)  
 - **Cost posture:** all free if possible; paid only as escape hatches  
 - **Validation:** FastAPI default **422** for request validation  
 
@@ -109,7 +122,9 @@ Use as intent history; current locks above override if anything conflicts.
 19. If missing CLI/SSH/API credentials → ask immediately.  
 20. NPÚ uses **MapServer**; portal npu.cz; concrete layer **CP_UAP_PVO/MapServer/0** on `geoportal.npu.cz`.  
 21. WSL project path: `/home/cursor/dev/genesis`; Origin repo private.  
-22. **This step:** document prompts/decisions as **agents-instructions** in the repo for other agents.
+22. Document prompts/decisions as **agents-instructions** in the repo for other agents.  
+23. GitHub deploy mirror: **mkrejp/sbdb** with environment **release**; Railway **zesty-adaptation** deploys from that mirror (shared DB env vars).  
+24. Stage 7 includes explicit **build application** (Docker from `mkrejp/sbdb`) before deploy/smoke.
 
 ---
 
@@ -122,6 +137,7 @@ Use as intent history; current locks above override if anything conflicts.
 | Stage 4 design (`notes-for-data-model.*`, API design) | Schema + API |
 | Stage 5 (`stage-five-tooling-and-optimizations.md`) | Pipeline/app tooling + perf; Cursor-plan tooling |
 | Stage 6 (`stage-six-final-build-plans.md`) | Final build-agent work packages (implement **after user approves**) |
+| Stage 7 (`stage-seven-build-and-deploy.md`) | **Build** app image + deploy + DB updates + smoke |
 | `npu-geoportal-sync.md` | NPÚ pagination / upsert practices |
 | DNS notes for `sbdb.animarium.ai` | CNAME → Railway |
 
@@ -149,10 +165,9 @@ Use as intent history; current locks above override if anything conflicts.
 
 ## 10. Current handoff snapshot
 
-- Stage 4 framework merged to `main` via PR #1 (`775339a` on user clone).  
-- Supabase schema applied on **samplebackdb**.  
-- Live NPÚ `/query` may need user’s network (WAF on some cloud IPs) — prefer WSL `/home/cursor/dev/genesis`.  
-- **Stage 5 done:** tooling + optimizations → [stage-five-tooling-and-optimizations.md](./stage-five-tooling-and-optimizations.md).  
-- **Stage 6 done (plans only):** [stage-six-final-build-plans.md](./stage-six-final-build-plans.md) — confirmed locks, `main` vs gaps, WP-A–E for build agents, NPÚ/WAF/WSL notes, stage 7–8 deploy handoff, do-not-reopen list.  
-- **Stage 6 approved → WP-A–E in draft PR #4** (`cursor/wp-a-e-harden-8c7c`): NPU defaults, API/sync harden, pre-commit/CI format, Dockerfile + Railway prep docs. No stage-7 deploy / live NPÚ fill from agents until authorized.  
-- After merge → stage 7 (deploy / DB updates / smoke) and stage 8 (eval / monitoring / version hygiene).
+- Origin `main` includes framework + WP-A–E harden ([PR #4](https://cursor.com/codebase/marek-k-ejpsk/genesis/pull/4) merged).  
+- Supabase schema on **samplebackdb**.  
+- **Deploy topology:** Origin genesis → mirror to [mkrejp/sbdb](https://github.com/mkrejp/sbdb) (`release`) → Railway **zesty-adaptation** / **sbdb-api**. Shared vars staged/accepted: `DATABASE_URL`, `LOG_LEVEL`, `PUBLIC_HOSTNAME`.  
+- **Stage 7 in progress:** first GitHub mirror push may need write auth; Railway cannot connect until `mkrejp/sbdb` has `main`. Prefer WSL or authenticated `gh`/PAT for mirror.  
+- Live NPÚ `/query`: prefer WSL (cloud WAF).  
+- Stages 5–6 docs: tooling + [stage-six-final-build-plans.md](./stage-six-final-build-plans.md).
