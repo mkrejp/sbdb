@@ -79,7 +79,7 @@ Config / `.env.example` defaults match the CP_UAP_PVO mapping above:
 | `NPU_URL_FIELDS` | `urlExt,urlInt` |
 | `NPU_TEMPORAL_FIELDS` | `platn_od,platn_do,aktual,datumStavuOchrany` |
 
-CLI headers: `User-Agent: YourSyncBot/1.0`, `Accept: application/json`. Retries with backoff on HTTP 429/5xx.
+CLI headers: `User-Agent: YourSyncBot/1.0`, `Accept: application/json` on every NPÚ call. Retries with backoff on HTTP 429/5xx: **1 try + 3 retries = 4 attempts** per URL/address, then abort. Metadata GET prefers `f=pjson` (falls back to `f=json`).
 
 ## Where to run live sync
 

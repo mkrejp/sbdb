@@ -7,7 +7,8 @@ Follows docs/npu-geoportal-sync.md:
 - Upsert by NPÚ OBJECTID/id into layer_objects.npu_objectid
 - One DB transaction per page; stream page → upsert
 - Headers: User-Agent YourSyncBot/1.0, Accept application/json
-- Retry 429/5xx with exponential backoff
+- Retry 429/5xx with exponential backoff (1 try + 3 retries = 4 attempts per URL)
+- Metadata: prefer f=pjson, fall back to f=json
 
 Usage (prefer user WSL when cloud IPs are WAF-blocked)::
 
@@ -66,7 +67,8 @@ _SKIP_PROP_KEYS = frozenset(
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 _EPOCH_MS_MIN = 1_000_000_000_000  # ~2001 in ms
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
-_MAX_RETRIES = 4
+# Per URL/address: 1 initial attempt + 3 retries = 4 attempts, then abort.
+_MAX_RETRIES = 3
 _BACKOFF_BASE_S = 0.5
 
 
@@ -104,7 +106,11 @@ def _request_with_retries(
     *,
     params: dict[str, str] | None = None,
 ) -> httpx.Response:
-    """HTTP request with backoff on 429/5xx."""
+    """HTTP request with backoff on 429/5xx.
+
+    Makes 1 initial attempt plus up to ``_MAX_RETRIES`` retries (4 total)
+    for each URL/address, then raises.
+    """
     last_exc: Exception | None = None
     for attempt in range(_MAX_RETRIES + 1):
         try:
@@ -142,9 +148,33 @@ def _request_with_retries(
 
 
 def fetch_layer_metadata(client: httpx.Client, layer_root: str) -> LayerMeta:
-    """GET layer root metadata JSON; require pagination support."""
-    response = _request_with_retries(client, "GET", layer_root, params={"f": "json"})
-    data = response.json()
+    """GET layer root metadata JSON; prefer ``f=pjson``, fall back to ``f=json``."""
+    data: dict[str, Any] | None = None
+    last_status_error: httpx.HTTPStatusError | None = None
+    # pjson matches docs / browser-friendly ArcGIS metadata; json is fallback.
+    for fmt in ("pjson", "json"):
+        try:
+            response = _request_with_retries(
+                client, "GET", layer_root, params={"f": fmt}
+            )
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise RuntimeError(f"Layer metadata was not a JSON object (f={fmt})")
+            data = payload
+            break
+        except httpx.HTTPStatusError as exc:
+            last_status_error = exc
+            logger.warning(
+                "npu_metadata_format_failed f=%s status=%s url=%s",
+                fmt,
+                exc.response.status_code,
+                layer_root,
+            )
+    if data is None:
+        if last_status_error is not None:
+            raise last_status_error
+        raise RuntimeError(f"Layer metadata unavailable for {layer_root}")
+
     if "error" in data:
         raise RuntimeError(f"Layer metadata error: {data['error']}")
 

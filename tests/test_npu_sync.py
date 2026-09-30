@@ -105,7 +105,9 @@ def test_fetch_metadata_and_pagination() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         assert request.headers.get("User-Agent") == SYNC_USER_AGENT
+        assert request.headers.get("Accept") == "application/json"
         if path.endswith("/0"):
+            assert request.url.params.get("f") == "pjson"
             return httpx.Response(
                 200,
                 json={
@@ -181,6 +183,68 @@ def test_request_retries_on_429(monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.status_code == 200
     assert calls["n"] == 3
     assert len(sleeps) == 2
+
+
+def test_request_retries_three_times_on_500_then_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HTTP 500: 1 try + 3 retries (4 attempts) then abort with HTTPStatusError."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        "sample_db_backend.sync.npu_geoportal.time.sleep",
+        lambda s: sleeps.append(s),
+    )
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        assert request.headers.get("User-Agent") == SYNC_USER_AGENT
+        assert request.headers.get("Accept") == "application/json"
+        return httpx.Response(500, json={"error": "server"})
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport) as client:
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            _request_with_retries(client, "GET", "https://example.test/meta")
+    assert exc_info.value.response.status_code == 500
+    assert calls["n"] == 4  # 1 initial + 3 retries
+    assert len(sleeps) == 3
+    assert sleeps == [0.5, 1.0, 2.0]
+
+
+def test_fetch_metadata_falls_back_to_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If f=pjson keeps failing after retries, fall back to f=json."""
+    monkeypatch.setattr(
+        "sample_db_backend.sync.npu_geoportal.time.sleep",
+        lambda _s: None,
+    )
+    seen_formats: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fmt = request.url.params.get("f", "")
+        seen_formats.append(fmt)
+        assert request.headers.get("User-Agent") == SYNC_USER_AGENT
+        assert request.headers.get("Accept") == "application/json"
+        if fmt == "pjson":
+            return httpx.Response(500, json={"error": "pjson fail"})
+        return httpx.Response(
+            200,
+            json={
+                "name": "FallbackLayer",
+                "maxRecordCount": 500,
+                "advancedQueryCapabilities": {"supportsPagination": True},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport) as client:
+        meta = fetch_layer_metadata(client, "https://example.test/MapServer/0")
+    assert meta.name == "FallbackLayer"
+    assert meta.max_record_count == 500
+    assert seen_formats.count("pjson") == 4  # exhausted retries on pjson
+    assert seen_formats[-1] == "json"
 
 
 def test_config_defaults_match_cp_uap_pvo() -> None:
