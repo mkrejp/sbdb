@@ -28,15 +28,11 @@ while [[ $# -gt 0 ]]; do
 done
 : "${out:?wget mock missing -O}"
 : "${url:?wget mock missing url}"
-# URL must be last positional recorded; options already consumed
 # Record calls for assertions
 echo "${url}" >> "${MOCK_BIN}/wget-calls.txt"
 FIXTURES_DIR="${FIXTURES_DIR:?}"
 if [[ "${url}" == *"/query?"* ]]; then
   if [[ "${url}" == *"returnIdsOnly"* ]]; then
-    # First list page has ids; subsequent empty (offset>0 simulated by call count)
-    n=$(wc -l < "${MOCK_BIN}/wget-calls.txt" | tr -d ' ')
-    # calls: 1=meta, 2=list, 3+=detail or next list
     if [[ "${url}" == *"resultOffset=0"* ]] || [[ "${url}" != *"resultOffset="* ]]; then
       cp "${FIXTURES_DIR}/pamatky-ids.json" "${out}"
     else
@@ -70,6 +66,17 @@ case "$cmd" in
     python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
 [print(i) for i in (d.get("objectIds") or [])]' "$path"
     ;;
+  missing-ids)
+    # Echo stdin IDs that are NOT in MOCK_EXISTING_IDS (comma-separated)
+    existing="${MOCK_EXISTING_IDS:-}"
+    while IFS= read -r line; do
+      [[ -z "${line}" ]] && continue
+      if [[ ",${existing}," == *",${line},"* ]]; then
+        continue
+      fi
+      echo "${line}"
+    done
+    ;;
   ensure-layer) echo "00000000-0000-0000-0000-000000000001" ;;
   upsert-file)
     path="$1"
@@ -88,19 +95,43 @@ export NPU_LAYER_URL='https://example.test/MapServer/0'
 export NPU_DETAIL_BATCH=2
 export NPU_MAX_RETRIES=0
 export MOCK_BIN
+export MOCK_EXISTING_IDS=''
 
-# sleep no-op not needed (no retries)
-
-bash "${ROOT}/scripts/sample-db-npu-sync"
-
+# --- Case 1: no existing IDs → detail fetches happen ---
+rm -f "${MOCK_BIN}/wget-calls.txt"
+out1="$(bash "${ROOT}/scripts/sample-db-npu-sync" 2>&1)"
 calls="$(cat "${MOCK_BIN}/wget-calls.txt")"
-echo "wget calls:"
+echo "wget calls (insert, none existing):"
 echo "${calls}"
-
-# Expect: meta, list (offset 0), then detail batches for 101,102 and 103, then maybe stop
 echo "${calls}" | grep -q '?f=json'
 echo "${calls}" | grep -q 'returnIdsOnly=true'
 echo "${calls}" | grep -q 'objectIds='
 echo "${calls}" | grep -q 'f=geojson'
+echo "${out1}" | grep -q 'mode=insert'
 
-echo "OK: bash orchestrator smoke passed (mocked wget + helpers)"
+# --- Case 2: all IDs already present → skip details + suggest --diff ---
+rm -f "${MOCK_BIN}/wget-calls.txt"
+export MOCK_EXISTING_IDS='101,102,103'
+out2="$(bash "${ROOT}/scripts/sample-db-npu-sync" 2>&1)" || true
+calls2="$(cat "${MOCK_BIN}/wget-calls.txt")"
+echo "wget calls (insert, all existing):"
+echo "${calls2}"
+echo "${calls2}" | grep -q 'returnIdsOnly=true'
+if echo "${calls2}" | grep -q 'objectIds='; then
+  echo "FAIL: expected no detail wget when all IDs exist" >&2
+  exit 1
+fi
+echo "${out2}" | grep -q 'already in the database'
+echo "${out2}" | grep -q '\-\-diff'
+
+# --- Case 3: diff mode fetches details even when all "exist" ---
+rm -f "${MOCK_BIN}/wget-calls.txt"
+export MOCK_EXISTING_IDS='101,102,103'
+out3="$(bash "${ROOT}/scripts/sample-db-npu-sync" --diff 2>&1)"
+calls3="$(cat "${MOCK_BIN}/wget-calls.txt")"
+echo "wget calls (diff mode):"
+echo "${calls3}"
+echo "${calls3}" | grep -q 'objectIds='
+echo "${out3}" | grep -q 'mode=diff'
+
+echo "OK: bash orchestrator smoke passed (skip-existing + diff suggestion)"
