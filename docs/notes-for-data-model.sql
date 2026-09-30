@@ -26,17 +26,23 @@ CREATE TABLE map_layers (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
+    source_key TEXT,
+    source_url TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT map_layers_name_not_blank CHECK (char_length(btrim(name)) > 0)
 );
 
 CREATE INDEX idx_map_layers_created_at ON map_layers (created_at DESC);
+CREATE UNIQUE INDEX uq_map_layers_source_key
+    ON map_layers (source_key)
+    WHERE source_key IS NOT NULL;
 
--- Layer objects (= GeoJSON features)
+-- Layer objects (= GeoJSON features); npu_objectid = NPÚ sync upsert key
 CREATE TABLE layer_objects (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     layer_id UUID NOT NULL REFERENCES map_layers (id) ON DELETE CASCADE,
+    npu_objectid BIGINT,
     geometry JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -46,6 +52,9 @@ CREATE TABLE layer_objects (
 
 CREATE INDEX idx_layer_objects_layer_id ON layer_objects (layer_id);
 CREATE INDEX idx_layer_objects_geometry_gin ON layer_objects USING GIN (geometry);
+CREATE UNIQUE INDEX uq_layer_objects_layer_npu_objectid
+    ON layer_objects (layer_id, npu_objectid)
+    WHERE npu_objectid IS NOT NULL;
 
 -- Typed additional properties (discriminated by value_type)
 CREATE TABLE layer_object_properties (

@@ -1,6 +1,14 @@
 {
   "artifact": "notes-for-data-model",
-  "domain": "GeoJSON map layers with typed properties, tags, and URL lists",
+  "domain": "GeoJSON map layers with typed properties, tags, URL lists; NPÚ Geoportal ingest",
+  "ingest": {
+    "source": "NPÚ Geoportal ArcGIS REST",
+    "module": "src/sample_db_backend/sync/npu_geoportal.py",
+    "practices_doc": "docs/npu-geoportal-sync.md",
+    "geometry_storage": "JSONB (PostGIS ST_GeomFromGeoJSON optional later)",
+    "pagination": ["read maxRecordCount", "resultOffset", "resultRecordCount", "outSR=4326", "f=geojson"],
+    "upsert_key": "layer_objects.npu_objectid from properties.OBJECTID|id"
+  },
   "storage_choices": {
     "geometry": {
       "choice": "JSONB",
@@ -8,61 +16,49 @@
     },
     "images_and_binary_properties": {
       "choice": "Supabase Storage references",
-      "rationale": "Typed image/binary properties store bucket/path/url + metadata — not BYTEA. Distinct from layer_object_urls."
+      "rationale": "Typed image/binary properties store bucket/path/url + metadata — not BYTEA."
     },
     "object_url_lists": {
       "choice": "layer_object_urls table (1:N)",
-      "rationale": "Explicit ordered URL list per object, separate from typed image/binary Storage props."
+      "rationale": "Explicit ordered URL list per object; filled from NPÚ URL-like attributes."
     }
+  },
+  "field_mapping": {
+    "layer_root_url": "map_layers.source_url + source_key=npu:<url>",
+    "layer_metadata_name": "map_layers.name",
+    "feature_geometry": "layer_objects.geometry",
+    "OBJECTID_or_id": "layer_objects.npu_objectid",
+    "NPU_TAG_FIELDS": "tags + layer_object_tags",
+    "NPU_URL_FIELDS_or_http_values": "layer_object_urls",
+    "date_like_attributes": "layer_object_properties value_type=temporal",
+    "other_scalars": "layer_object_properties value_type=text"
   },
   "tables": [
     {
       "name": "map_layers",
-      "description": "Generic map layer containers",
-      "columns": ["id", "name", "description", "created_at", "updated_at"]
+      "columns": ["id", "name", "description", "source_key", "source_url", "created_at", "updated_at"]
     },
     {
       "name": "layer_objects",
-      "description": "Layer objects / GeoJSON features",
-      "foreign_keys": [{ "column": "layer_id", "references": "map_layers.id", "on_delete": "CASCADE" }],
-      "columns": ["id", "layer_id", "geometry (jsonb)", "created_at", "updated_at"]
+      "columns": ["id", "layer_id", "npu_objectid", "geometry (jsonb)", "created_at", "updated_at"],
+      "unique": [["layer_id", "npu_objectid"]]
     },
     {
       "name": "layer_object_properties",
-      "description": "Typed additional properties (discriminated by value_type)",
-      "foreign_keys": [{ "column": "object_id", "references": "layer_objects.id", "on_delete": "CASCADE" }],
-      "unique": [["object_id", "key"]],
       "discriminant": {
         "column": "value_type",
-        "enum": ["text", "temporal", "image", "binary"],
-        "payloads": {
-          "text": ["text_value"],
-          "temporal": ["temporal_value", "temporal_end?"],
-          "image": ["storage_bucket", "storage_path", "storage_url?", "content_type?", "byte_size?", "checksum?", "meta"],
-          "binary": ["storage_bucket", "storage_path", "storage_url?", "content_type?", "byte_size?", "checksum?", "meta"]
-        }
+        "enum": ["text", "temporal", "image", "binary"]
       }
     },
-    {
-      "name": "tags",
-      "description": "Classification labels",
-      "columns": ["id", "name (unique)", "created_at", "updated_at"]
-    },
-    {
-      "name": "layer_object_tags",
-      "description": "Many-to-many: objects ↔ tags",
-      "primary_key": ["object_id", "tag_id"]
-    },
+    { "name": "tags" },
+    { "name": "layer_object_tags", "primary_key": ["object_id", "tag_id"] },
     {
       "name": "layer_object_urls",
-      "description": "Ordered URL list per object (1:N); not typed Storage properties",
-      "foreign_keys": [{ "column": "object_id", "references": "layer_objects.id", "on_delete": "CASCADE" }],
-      "columns": ["id", "object_id", "url", "label", "sort_order", "created_at", "updated_at"],
-      "indexes": ["(object_id, sort_order)"]
+      "columns": ["id", "object_id", "url", "label", "sort_order", "created_at", "updated_at"]
     }
   ],
   "security": {
     "rls": true,
-    "note": "RLS on all tables; FastAPI uses DATABASE_URL role (bypasses RLS)."
+    "note": "RLS on all tables; FastAPI/sync use DATABASE_URL role (bypasses RLS)."
   }
 }

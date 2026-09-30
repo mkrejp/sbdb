@@ -4,7 +4,9 @@ Implementation design for the Sample DB backend. Stack: **Python FastAPI** + **P
 
 **Domain:** GeoJSON **map layers** (design artifact label: **notes-for-data-model**).
 
-Artifacts: [notes-for-data-model.sql](./notes-for-data-model.sql) · [notes-for-data-model.json](./notes-for-data-model.json) · [api-design.json](./api-design.json)
+**Initial fill:** [NPÚ Geoportal REST](./npu-geoportal-sync.md) via paged GeoJSON sync → upsert (`src/sample_db_backend/sync/npu_geoportal.py`).
+
+Artifacts: [notes-for-data-model.sql](./notes-for-data-model.sql) · [notes-for-data-model.json](./notes-for-data-model.json) · [api-design.json](./api-design.json) · [npu-geoportal-sync.md](./npu-geoportal-sync.md)
 
 ---
 
@@ -14,8 +16,9 @@ Artifacts: [notes-for-data-model.sql](./notes-for-data-model.sql) · [notes-for-
 | --- | --- | --- |
 | HTTP API | `src/sample_db_backend/` | FastAPI routes, Pydantic validation (`422`) |
 | Services | `services/layers.py` | Layers / objects / typed props / tags / URLs |
+| NPÚ sync | `sync/npu_geoportal.py` | Paged FeatureServer fetch + upsert (CLI `sample-db-npu-sync`) |
 | Persistence | `db.py` + SQL | `DATABASE_URL` or in-memory stub |
-| Migrations | `migrations/*.sql` | Versioned SQL |
+| Migrations | `migrations/*.sql` | Versioned SQL (`001` schema, `002` NPÚ keys) |
 | CI | `.github/workflows/ci.yml` | Ruff + pytest |
 | Host (later) | Railway | Autodeploy `main`; DB on Supabase |
 
@@ -29,47 +32,87 @@ No auth, queues, or frontend in this slice.
 
 | Concern | Choice | Why |
 | --- | --- | --- |
-| Geometry | **JSONB** GeoJSON | Free-tier friendly; GIN index; PostGIS later if needed |
-| Image/binary **properties** | **Supabase Storage refs** on the property row | Avoid large BYTEA; bucket/path/url + metadata |
-| Explicit URL lists | **`layer_object_urls`** (1:N, `sort_order`) | Distinct from typed image/binary Storage properties |
+| Geometry | **JSONB** GeoJSON | Free-tier friendly; GIN index; PostGIS/`ST_GeomFromGeoJSON` optional later |
+| Image/binary **properties** | **Supabase Storage refs** | Avoid BYTEA; distinct from URL lists |
+| Explicit URL lists | **`layer_object_urls`** | Ordered 1:N per object |
+| NPÚ identity | **`layer_objects.npu_objectid`** | Upsert key (`OBJECTID`/`id`); unique per layer |
 
 ### Tables
 
 | Table | Purpose |
 | --- | --- |
-| `map_layers` | Generic layer containers |
-| `layer_objects` | Layer objects / GeoJSON features (`geometry JSONB`) |
-| `layer_object_properties` | Typed props: `value_type` ∈ `text\|temporal\|image\|binary` |
+| `map_layers` | Layer containers (+ `source_key` / `source_url` for NPÚ) |
+| `layer_objects` | GeoJSON features (`geometry JSONB`, `npu_objectid`) |
+| `layer_object_properties` | Typed props: `text` / `temporal` / `image` / `binary` |
 | `tags` | Classification labels |
 | `layer_object_tags` | M2M objects ↔ tags |
 | `layer_object_urls` | Ordered URL list per object |
 
-RLS enabled on all tables; FastAPI uses the Postgres role (bypasses RLS).
+RLS enabled; FastAPI / sync use the Postgres role (bypasses RLS).
 
 ---
 
-## 3. API (summary)
+## 3. NPÚ ingest path
 
-Layers, objects, properties, tags (+ attach/detach), URLs. Validation → **422**. Conflicts (unique key/tag) → **409**. Missing → **404**. See [api-design.json](./api-design.json).
+Practices: [npu-geoportal-sync.md](./npu-geoportal-sync.md) (do not invent a different approach).
+
+1. Read **layer root** metadata → `maxRecordCount`, `supportsPagination`.
+2. Page `…/query` with `where=1=1`, `outFields=*`, `outSR=4326`, `f=geojson`, `resultOffset`, `resultRecordCount≤max`.
+3. Stream each page → upsert (avoid loading entire huge layers into memory).
+4. Upsert: `INSERT … ON CONFLICT (layer_id, npu_objectid) DO UPDATE` geometry; refresh properties/tags/urls for that object.
+
+### Field mapping (NPÚ → app)
+
+| NPÚ source | App target |
+| --- | --- |
+| FeatureServer layer root + metadata `name` | `map_layers` (`source_url`, `source_key=npu:<url>`, `name`) |
+| Feature `geometry` (WGS84 GeoJSON) | `layer_objects.geometry` (JSONB) |
+| `properties.OBJECTID` or `properties.id` | `layer_objects.npu_objectid` (sync key) |
+| Attributes in `NPU_TAG_FIELDS` (default `TYP,KATEGORIE,DRUH,STATUS,TYP_PAM`) | `tags` + `layer_object_tags` |
+| Attributes in `NPU_URL_FIELDS` or values matching `http(s)://` | `layer_object_urls` (`label`=field name, `sort_order`) |
+| Date-like attrs (`DATUM`/`DATE`/… or epoch ms) | `layer_object_properties` `value_type=temporal` |
+| Remaining scalar attrs | `layer_object_properties` `value_type=text` |
+| Image/binary Storage | Not filled by NPÚ sync (manual / later); keep Storage-ref model |
+
+### Config
+
+| Env | Purpose |
+| --- | --- |
+| `NPU_LAYER_URL` | ArcGIS **layer root** (`…/FeatureServer/0`). Placeholder OK until exact Geoportal layer chosen — see `.env.example` |
+| `NPU_LAYER_NAME` | Optional override for `map_layers.name` |
+| `NPU_TAG_FIELDS` / `NPU_URL_FIELDS` | Comma-separated attribute → tags / URLs |
+
+```bash
+uv run sample-db-npu-sync
+```
+
+Requires `DATABASE_URL` + `NPU_LAYER_URL`. No secrets in git.
 
 ---
 
-## 4. Env vars
+## 4. API (summary)
 
-`DATABASE_URL`, `PORT` (default `8010`), `HOST`, `LOG_LEVEL`, `PUBLIC_HOSTNAME` (`sbdb.animarium.ai`). `.env.example` only — never commit secrets. Prefer Supabase **pooler** URL for Railway.
+Layers, objects, properties, tags, URLs. Validation → **422**. See [api-design.json](./api-design.json).
 
 ---
 
-## 5. Migrate / deploy (stage 3 aligned)
+## 5. Env vars
+
+`DATABASE_URL`, `PORT`, `HOST`, `LOG_LEVEL`, `PUBLIC_HOSTNAME`, plus NPÚ vars above. Prefer Supabase **pooler** for Railway.
+
+---
+
+## 6. Migrate / deploy
 
 ```bash
 psql "$DATABASE_URL" -f migrations/001_create_notes_for_data_model.sql
+psql "$DATABASE_URL" -f migrations/002_npu_sync_keys.sql   # if upgrading from 001-only
 ```
 
-Release: PR → GHA lint+test → merge → Railway Wait-for-CI → migrate Supabase Free → smoke `/health`. Wake Free project if paused. No destructive auto-resets.
+Then optional: `uv run sample-db-npu-sync` for initial fill. Schedule weekly/monthly later (stage 7).
 
 ---
 
-## 6. Out of scope here
+## 7. Out of scope here
 
-Auth, PostGIS spatial ops, Storage upload helpers (refs only), Alembic, frontend map UI.
+Auth, PostGIS spatial ops, Storage upload helpers, live NPÚ URL selection (config placeholder), Alembic, frontend map UI.

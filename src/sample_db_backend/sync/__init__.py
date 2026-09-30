@@ -1,0 +1,1 @@
+"""NPÚ Geoportal sync package."""

@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 sample-db-backend = "sample_db_backend:main"
+sample-db-npu-sync = "sample_db_backend.sync.npu_geoportal:main"
 
 [build-system]
 requires = ["uv_build>=0.12.21,<0.13.0"]
