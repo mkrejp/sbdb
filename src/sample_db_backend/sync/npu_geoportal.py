@@ -449,7 +449,8 @@ def load_db_snapshot(
     """Load the stored snapshot for one NPÚ OBJECTID, or None if absent."""
     row = conn.execute(
         """
-        SELECT id, geometry
+        SELECT id,
+               COALESCE(ST_AsGeoJSON(geom)::jsonb, geometry) AS geometry
         FROM layer_objects
         WHERE layer_id = %s AND npu_objectid = %s
         """,
@@ -562,17 +563,24 @@ def upsert_feature(
         logger.warning("Skipping feature without OBJECTID/id: keys=%s", list(props)[:12])
         return False
 
+    geojson_text = json.dumps(geometry, separators=(",", ":"), ensure_ascii=False)
     row = conn.execute(
         """
-        INSERT INTO layer_objects (layer_id, npu_objectid, geometry)
-        VALUES (%s, %s, %s)
+        INSERT INTO layer_objects (layer_id, npu_objectid, geometry, geom)
+        VALUES (
+            %s,
+            %s,
+            %s,
+            ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)
+        )
         ON CONFLICT (layer_id, npu_objectid) WHERE npu_objectid IS NOT NULL
         DO UPDATE SET
             geometry = EXCLUDED.geometry,
+            geom = EXCLUDED.geom,
             updated_at = now()
         RETURNING id
         """,
-        (layer_id, npu_id, Jsonb(geometry)),
+        (layer_id, npu_id, Jsonb(geometry), geojson_text),
     ).fetchone()
     assert row is not None
     object_id = row["id"]

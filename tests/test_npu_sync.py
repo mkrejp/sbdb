@@ -234,7 +234,7 @@ class _FakeConn:
 
 
 def test_upsert_feature_writes_object_and_children() -> None:
-    """Upsert inserts layer_objects and derived tag/url/text rows."""
+    """Upsert inserts layer_objects (PostGIS + JSONB) and derived tag/url/text rows."""
     conn = _FakeConn()
     feature = features_from_detail(load_json_file(FIXTURES / "detail.geojson"))[0]
     ok = upsert_feature(
@@ -248,9 +248,17 @@ def test_upsert_feature_writes_object_and_children() -> None:
     assert ok is True
     joined = " ".join(s[0] for s in conn.statements).lower()
     assert "insert into layer_objects" in joined
+    assert "st_geomfromgeojson" in joined
+    assert "st_setsrid" in joined
+    assert "geom" in joined
     assert "insert into tags" in joined
     assert "layer_object_urls" in joined
     assert "layer_object_properties" in joined
+    insert_params = next(
+        params for sql, params in conn.statements if "insert into layer_objects" in sql.lower()
+    )
+    assert insert_params is not None
+    assert len(insert_params) == 4  # layer_id, npu_id, Jsonb, geojson text
 
 
 def test_upsert_detail_file_commits_once(monkeypatch: MonkeyPatch) -> None:
