@@ -27,11 +27,18 @@ def database_configured() -> bool:
 
 @contextmanager
 def get_connection() -> Iterator[psycopg.Connection[Any]]:
-    """Open a short-lived connection to Supabase Postgres."""
+    """Open a short-lived connection with PostGIS functions on the search_path.
+
+    Production PostGIS lives in schema ``extensions``. ``public`` stays first so
+    public tables resolve. CI images that install PostGIS in ``public`` still
+    work. Session ``SET`` (not ``SET LOCAL``) lasts for this short-lived
+    connection even across implicit commits.
+    """
     url = get_settings().database_url
     if not url:
         raise RuntimeError("DATABASE_URL is not set")
     with psycopg.connect(url, row_factory=dict_row) as conn:
+        conn.execute("SET search_path TO public, extensions")
         yield conn
 
 
